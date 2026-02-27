@@ -683,6 +683,76 @@ def check_ngsolve_pinvit_no_projection(filepath: str, lines: List[str]) -> List[
     return findings
 
 
+def check_eddy_current_missing_complex(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: Eddy current HCurl/H1 spaces must use complex=True."""
+    findings = []
+    has_eddy_context = any(
+        kw in line.lower()
+        for line in lines
+        for kw in ['eddy', 'induction_heating', 'joule', 'freq', '2j *',
+                    'a + grad(phi)', 'a+grad(phi)']
+    )
+    if not has_eddy_context:
+        return findings
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        # HCurl or H1 in eddy current context without complex=True
+        if re.search(r'(?:HCurl|H1)\s*\(', stripped):
+            has_complex = 'complex=True' in stripped or 'complex = True' in stripped
+            # Skip H1 for thermal (no complex needed for temperature)
+            is_thermal = any(
+                kw in stripped.lower()
+                for kw in ['temperature', 'thermal', 'heat']
+            )
+            if not has_complex and not is_thermal:
+                # Check if this is a definedon for thermal (checking context)
+                context = ' '.join(lines[max(0,i-3):i+2])
+                is_thermal_ctx = any(
+                    kw in context.lower()
+                    for kw in ['temperature', 'thermal', 'heat equation',
+                                'rho_c', 'kappa', 'convection']
+                )
+                if not is_thermal_ctx:
+                    findings.append({
+                        'line': i,
+                        'severity': 'HIGH',
+                        'rule': 'eddy-current-missing-complex',
+                        'message': (
+                            'FE space in eddy current context without complex=True. '
+                            'Frequency-domain eddy current analysis requires complex-'
+                            'valued spaces. Add complex=True parameter.'
+                        ),
+                    })
+    return findings
+
+
+def check_joule_heat_missing_conj(filepath: str, lines: List[str]) -> List[Dict]:
+    """MODERATE: Joule heat Q must use Conj(E), not E*E."""
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        # Look for Q = ... sigma * InnerProduct(E, E) without Conj
+        if re.search(r'InnerProduct\s*\(\s*E\s*,\s*E\s*\)', stripped):
+            if 'Conj' not in stripped:
+                findings.append({
+                    'line': i,
+                    'severity': 'MODERATE',
+                    'rule': 'joule-heat-missing-conj',
+                    'message': (
+                        'Joule heat uses InnerProduct(E, E) instead of '
+                        'InnerProduct(E, Conj(E)). For complex fields, '
+                        'E*E gives a complex number, not real power. '
+                        'Use: 0.5 * sigma * InnerProduct(E, Conj(E)).real'
+                    ),
+                })
+    return findings
+
+
 def check_ngsolve_kelvin_missing_bonus_intorder(filepath: str, lines: List[str]) -> List[Dict]:
     """MODERATE: Kelvin transform bilinear form without bonus_intorder."""
     findings = []
@@ -734,4 +804,7 @@ ALL_RULES = [
     # NGSolve rules (docs-sourced)
     check_ngsolve_vectorh1_for_em,
     check_ngsolve_pinvit_no_projection,
+    # NGSolve rules (induction heating)
+    check_eddy_current_missing_complex,
+    check_joule_heat_missing_conj,
 ]

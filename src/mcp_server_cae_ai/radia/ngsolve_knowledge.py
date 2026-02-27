@@ -466,6 +466,49 @@ for ed in mesh.edges:
     fes.SetCouplingType(dofs[0], COUPLING_TYPE.WIREBASKET_DOF)
 ```
 
+## HCurl AMG Preconditioner (for Large EM Problems)
+
+For large HCurl systems (>100K DOFs), use algebraic multigrid with Hiptmair smoother:
+
+```python
+fes = HCurl(mesh, order=0, nograds=True)
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += 1/mu * curl(u) * curl(v) * dx + 1e-6/mu * u * v * dx
+
+# HCurl AMG with Hiptmair smoother (Reitzinger-Schoeberl)
+pre = preconditioners.HCurlAMG(a,
+    smoothingsteps=3,           # Gauss-Seidel sweeps per level
+    smoothedprolongation=True,  # Improve prolongation operator
+    maxcoarse=10,               # Max coarse-level DOFs
+    maxlevel=10,                # Max AMG levels
+    potentialsmoother='amg',    # AMG on potential (H1) space
+    verbose=2)                  # Print level details
+
+with TaskManager():
+    a.Assemble()
+    inv = CGSolver(a.mat, pre.mat, tol=1e-8, maxiter=100)
+    gfu.vec.data = inv * f.vec
+```
+
+**Hiptmair smoother**: Decomposes HCurl = grad(H1) + complement;
+applies separate AMG smoothers to each part. Standard multigrid fails
+on HCurl because the curl kernel (gradient fields) is not handled.
+
+### h1amg for Large H1 Problems
+
+```python
+# Use as standalone or as BDDC coarse solver
+c = Preconditioner(a, "bddc", coarsetype="h1amg")
+
+# Or standalone:
+pre = preconditioners.h1amg(a)
+```
+
+**h1amg** uses unsmoothed agglomeration with edge-weight Schur complements.
+Works well for scalar H1 problems (Poisson, scalar potential).
+
 ## FEM-BEM Preconditioner
 
 For coupled FEM-BEM systems (indefinite):
@@ -658,7 +701,27 @@ cylinder = Cylinder(Pnt(0,0,0), Z, r=0.5, h=2.0)
 # Boolean operations
 result = box - sphere          # Difference
 result = box * sphere          # Intersection
-result = Glue([box, sphere])   # Non-overlapping union
+result = box + sphere          # Fusion (single solid, NO internal interface)
+result = Glue([box, sphere])   # Glue (keeps internal interface between solids)
+```
+
+**CRITICAL: Glue vs Fusion (+)**
+
+| Operation | Internal Interface | Material Regions | Use Case |
+|-----------|-------------------|-----------------|----------|
+| `Glue([a, b])` | Preserved | Separate materials | Multi-material EM |
+| `a + b` (fusion) | Removed | Single material | Uniform body |
+| `Compound([a, b])` | Independent | Separate meshes | Components |
+
+For electromagnetic problems with different mu/sigma, ALWAYS use `Glue()`:
+```python
+# CORRECT: Glue preserves interface for material properties
+iron = Box(...); iron.solids.name = "iron"
+air = Sphere(...) - iron; air.solids.name = "air"
+geo = Glue([iron, air])  # dx("iron") and dx("air") work
+
+# WRONG: Fusion removes the interface
+geo = iron + air  # Only one material region!
 
 # Face naming (for boundary conditions)
 box.faces.name = "outer"
@@ -747,6 +810,91 @@ for l in range(max_levels):
     mesh.Refine()
 ```
 
+## Gmsh Mesh Import (ReadGmsh)
+
+Load external Gmsh v2 format meshes (from Cubit, Gmsh, or other generators):
+
+```python
+from netgen.read_gmsh import ReadGmsh
+from ngsolve import Mesh
+
+# Load Gmsh v2 mesh (.msh)
+ngmesh = ReadGmsh("model.msh")
+mesh = Mesh(ngmesh)
+
+# Physical groups become material names and boundary names
+print("Materials:", mesh.GetMaterials())
+print("Boundaries:", mesh.GetBoundaries())
+```
+
+**Key points:**
+- Physical groups in Gmsh map to `mesh.GetMaterials()` (volumes) and
+  `mesh.GetBoundaries()` (surfaces)
+- Supports 1st and 2nd order elements (TET4/TET10, HEX8/HEX20, etc.)
+- Use `dx("region_name")` and `ds("boundary_name")` in weak forms
+- Material properties via `CoefficientFunction([... for mat in mesh.GetMaterials()])`
+
+```python
+# Material properties from Gmsh physical groups
+mu_d = {"iron": 4e-7*3.14*1000, "air": 4e-7*3.14, "coil": 4e-7*3.14}
+mu = CoefficientFunction([mu_d.get(mat, 4e-7*3.14) for mat in mesh.GetMaterials()])
+```
+
+## VTK Output for ParaView
+
+```python
+from ngsolve import VTKOutput
+
+# Basic output (single snapshot)
+vtk = VTKOutput(mesh,
+                coefs=[B, J, Q],
+                names=["B", "J", "Q"],
+                filename="result",
+                subdivision=1,     # Subdivide for smooth higher-order plots
+                legacy=False)      # .vtu (XML) format, smaller files
+vtk.Do()
+```
+
+### Time Series with .pvd File
+
+Use `Do(time=t)` to create a .pvd collection file that ParaView reads as animation:
+
+```python
+# Create VTKOutput ONCE, call Do() each time step
+vtk = VTKOutput(mesh,
+                coefs=[gfT],
+                names=["Temperature"],
+                filename="thermal_series",
+                subdivision=1, legacy=False)
+
+for step in range(n_steps):
+    # ... solve time step ...
+    t += dt
+    vtk.Do(time=t)  # Writes thermal_series_N.vtu + updates .pvd
+
+# Open thermal_series.pvd in ParaView to play animation
+```
+
+### VTKOutput Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `subdivision` | Bisections per element (0=linear, 2=fine) | 0 |
+| `legacy` | True=.vtk (legacy), False=.vtu (XML) | True |
+| `floatsize` | "single" or "double" precision | "double" |
+| `only_element` | Export specific element index | None |
+
+### Do() Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `time` | Associate timestamp for .pvd animation |
+| `vb` | VOL (volume, default) or BND (boundary) |
+| `drawelems` | BitArray to select specific elements |
+
+**Note**: With `subdivision>0`, the visualized mesh is finer than
+the computational mesh. This is cosmetic only.
+
 ## Mesh Information
 
 ```python
@@ -818,13 +966,10 @@ def newton_solve(gfu, a, fes, tol=1e-10, maxiter=20, damping=1.0):
 
 ## Nonlinear Material Example (B-H Curve)
 
-```python
-# Piecewise linear interpolation of B-H curve
-BH_points = [(0, 0), (100, 0.5), (500, 1.0), (1000, 1.5), (10000, 2.0)]
-# ... (implement interpolation as CoefficientFunction)
+### Method 1: Analytical Tanh Model (simple)
 
-# Or use tanh model:
-from ngsolve import atan, sqrt
+```python
+from ngsolve import sqrt
 
 def nu_BH(B_squared):
     \"\"\"Reluctivity nu = 1/(mu_0 * mu_r(|B|)).\"\"\"
@@ -834,6 +979,77 @@ def nu_BH(B_squared):
     chi = M_sat / (B_mag / mu_0 + 1e-10)  # Susceptibility
     mu_r = 1 + chi
     return 1 / (mu_0 * mu_r)
+```
+
+### Method 2: BSpline Interpolation (measured data, TEAM benchmark)
+
+```python
+from netgen.occ import BSplineCurve1D
+
+# B-H data points (measured)
+B_data = [0, 0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
+H_data = [0, 80, 160, 300, 500, 800, 1500, 3000, 8000, 20000, 40000]
+
+# Create BSpline interpolation
+nu_spline = BSplineCurve1D(B_data, [h/b if b > 0 else H_data[1]/B_data[1]
+                                     for b, h in zip(B_data, H_data)])
+
+# Use in bilinear form (symbolic differentiation works!)
+B2 = InnerProduct(curl(u), curl(u))
+B_mag = sqrt(B2 + 1e-20)
+nu = nu_spline(B_mag)
+
+a = BilinearForm(fes)
+a += nu * curl(u) * curl(v) * dx
+```
+
+**IMPORTANT**: Do NOT use scipy.interp1d or Python callbacks.
+NGSolve CoefficientFunctions require symbolic math (sqrt, **, atan, exp, etc.)
+or BSpline for automatic differentiation in Newton's method.
+
+## Newton with BDDC Preconditioner (Large-Scale)
+
+For large nonlinear problems (>100K DOFs), use BDDC + CG per Newton step:
+
+```python
+a = BilinearForm(fes)
+a += nu_BH(InnerProduct(curl(u), curl(u))) * curl(u) * curl(v) * dx
+c = Preconditioner(a, "bddc")
+
+gfu = GridFunction(fes)
+for it in range(20):
+    a.Apply(gfu.vec, res)
+    a.AssembleLinearization(gfu.vec)
+    c.Update()  # Re-update preconditioner with new Jacobian
+
+    inv = CGSolver(a.mat, c.mat, tol=1e-8, maxiter=200)
+    du.data = inv * res
+    gfu.vec.data -= du
+
+    err = sqrt(abs(InnerProduct(du, res)))
+    print(f"Newton {it}: err = {err:.2e}")
+    if err < 1e-10:
+        break
+```
+
+## Implicit Time-Dependent Newton (Backward Euler + Newton)
+
+For time-dependent nonlinear problems (e.g., TEAM 24 motor benchmark):
+
+```python
+tau = 0.005  # time step [s]
+
+# Time-dependent eddy current: sigma/tau * (A - A_old) + curl(nu*curl(A)) = J
+a = BilinearForm(fes)
+a += sigma/tau * u * v * dx("conductor")       # Mass/time term
+a += nu_BH(curl(u)**2) * curl(u) * curl(v) * dx  # Nonlinear stiffness
+a += -sigma/tau * gfA_old * v * dx("conductor")   # Old time step
+a += -J_source * v * dx("coil")                   # Source
+
+# Newton at each time step
+for t_step in range(n_steps):
+    Newton(a, gfu, maxerr=1e-8, maxit=15, dampfactor=1.0)
+    gfA_old.vec.data = gfu.vec
 ```
 """
 
@@ -1386,6 +1602,101 @@ mesh.Curve(2)  # Curved for accuracy
 **Pitfall**: Using `geo.GenerateMesh(maxh=0.5)` without `perfstepsend`
 creates a full volume mesh. BEM operators then see both volume and surface
 elements, leading to incorrect results or excessive memory usage.
+
+## 36. Compress() for Subdomain FE Spaces (i-tutorials unit-1.5)
+
+```python
+# Space restricted to subdomain has many UNUSED_DOF entries
+fes1 = H1(mesh, definedon="conductor")
+print(fes1.ndof)  # Same as full mesh ndof (many unused)
+
+# CORRECT - use Compress() to remove unused DOFs
+fescomp = Compress(fes1)
+print(fescomp.ndof)  # Much smaller, only active DOFs
+```
+
+**Why**: Without `Compress()`, the stiffness matrix is much larger than
+necessary, wasting memory and solver time. Always compress subdomain spaces.
+
+## 37. mstar Sparsity Pattern Must Match (i-tutorials unit-3.1)
+
+For implicit time stepping `(M + dt*K) * u^{n+1} = ...`, both matrices
+must have identical sparsity patterns:
+
+```python
+# CORRECT: Use symmetric=False on both to ensure matching patterns
+a = BilinearForm(fes, symmetric=False)
+a += grad(u)*grad(v)*dx
+a.Assemble()
+
+m = BilinearForm(fes, symmetric=False)
+m += u*v*dx
+m.Assemble()
+
+# Combine via AsVector (element-wise addition of nonzero entries)
+mstar = m.mat.CreateMatrix()
+mstar.AsVector().data = m.mat.AsVector() + dt * a.mat.AsVector()
+```
+
+**Pitfall**: If the sparsity patterns differ (e.g., one is symmetric=True),
+`mstar.AsVector().data = ...` silently gives wrong results or crashes.
+
+## 38. NumberSpace for Circuit Coupling (NGS24 TEAM benchmark)
+
+For coupling FEM with external circuits (voltage/current source):
+
+```python
+# NumberSpace = single DOF representing a scalar (e.g., current I)
+N = NumberSpace(mesh)
+fes = HCurl(mesh, order=3, complex=True) * N
+(A, I), (v, w) = fes.TnT()
+
+# Bilinear form with circuit equation
+a = BilinearForm(fes)
+a += nu * curl(A) * curl(v) * dx           # EM equation
+a += I * J_coil * v * dx("coil")           # Current source
+a += A * J_coil * w * dx("coil")           # Flux linkage
+a += R * I * w * dx                         # Resistance
+
+# I (current) is solved simultaneously with A (vector potential)
+```
+
+**Use case**: Motor/transformer simulation with prescribed voltage.
+The coil current is unknown and coupled to the field via flux linkage.
+
+## 39. Glue vs Fusion for Multi-Material Geometry (i-tutorials unit-4.4)
+
+```python
+# WRONG: Fusion (+) removes internal interface
+geo = iron + air  # Single material, no interface!
+
+# CORRECT: Glue preserves internal interface
+geo = Glue([iron, air])  # dx("iron") and dx("air") work
+
+# CORRECT: Use - for subtraction (different from fusion)
+air = Sphere(...) - iron  # Air = Sphere minus iron region
+```
+
+## 40. Pickling of NGSolve Objects (appendix)
+
+```python
+import pickle
+
+# Save mesh + solution
+with open("solution.pkl", "wb") as f:
+    pickle.dump([mesh, gfu], f)
+
+# Load (shared references preserved: gfu.space.mesh == mesh)
+with open("solution.pkl", "rb") as f:
+    mesh2, gfu2 = pickle.load(f)
+
+# CoefficientFunction expression trees also supported
+func = x * gfu + y
+pickle.dump([mesh, func], outfile)
+```
+
+**Supported**: Mesh, FESpace, GridFunction, CoefficientFunction expressions.
+Shared references (e.g., two GridFunctions on same space) are preserved.
 """
 
 NGSOLVE_LINALG = """
@@ -1839,6 +2150,62 @@ Sigma = CoefficientFunction([sigma_d[mat] for mat in mesh.GetMaterials()])
 | **B . n** | Normal B continuity | Neumann | `(n * B) * psi * ds` |
 | **Periodic** | Kelvin transform | `Periodic(fes)` | `Identify(PERIODIC)` |
 | **CloseSurfaces** | Quasi-2D | `Identify(CLOSESURFACES)` | `ZRefine([])` |
+
+## Time-Domain Eddy Current (Backward Euler + Newton)
+
+For time-transient eddy current with nonlinear materials (e.g., TEAM 24):
+
+```python
+tau = 0.005  # time step [s]
+sigma = CoefficientFunction(...)  # conductivity
+
+# FE space: HCurl * NumberSpace (A + circuit current I)
+fes = HCurl(mesh, order=3, dirichlet="outer") * NumberSpace(mesh)
+(A, I), (v, w) = fes.TnT()
+
+# Nonlinear bilinear form (time-dependent)
+a = BilinearForm(fes)
+# Eddy current: sigma/tau * (A - A_old)
+a += sigma/tau * A * v * dx("conductor")
+a += -sigma/tau * gfA_old * v * dx("conductor")
+# Nonlinear reluctivity
+a += nu_BH(curl(A)**2) * curl(A) * curl(v) * dx
+# Circuit coupling: U = R*I + N/S * d(flux)/dt
+a += I * J_coil * v * dx("coil")
+a += A * J_coil * w * dx("coil")
+a += R * I * w * dx
+a += -U_applied * w * dx
+
+# Newton solve at each time step
+for step in range(n_steps):
+    Newton(a, gfAPhi, maxerr=1e-8, maxit=15)
+    gfA_old.vec.data = gfAPhi.components[0].vec
+```
+
+## Maxwell Stress Tensor for Torque Computation
+
+```python
+# Torque on rotor via Maxwell stress tensor integration
+# T = integral_S (1/mu_0) * [(B.n)*B - 0.5*|B|^2 * n] x r dS
+
+mu0 = 4e-7 * 3.14159265358979
+n = specialcf.normal(mesh.dim)
+B = curl(gfA)
+
+# For 2D (z-axis torque):
+Bn = B * n  # Normal component
+Bt = B - Bn * n  # Tangential component
+
+# Torque density: (1/mu0) * Bn * Bt * r (simplified for axisym)
+# In 3D: cross product of force and position vector
+r_vec = CF((x, y, 0))  # Position from rotation axis
+stress = (1/mu0) * (OuterProduct(B, B) - 0.5 * InnerProduct(B, B) * Id(3))
+force = stress * n  # Surface force density
+torque_density = Cross(r_vec, force)[2]  # Z-component of torque
+
+torque = Integrate(torque_density * ds("rotor_surface"), mesh)
+# Multiply by 2 if using symmetry reduction
+```
 """
 
 NGSOLVE_ADAPTIVE = """

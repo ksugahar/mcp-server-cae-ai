@@ -2,9 +2,10 @@
 Radia Project MCP Server
 
 Provides tools for:
-- Linting Python scripts against Radia + NGSolve conventions (21 rules)
+- Linting Python scripts against Radia + NGSolve conventions (23 rules)
 - Radia BEM library usage documentation
 - NGSolve FEM usage documentation (12 topics incl. EM formulations, adaptive)
+- Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
 - Kelvin transformation reference for open boundary FEM
 - ngsolve-sparsesolv (ICCG) solver documentation
 
@@ -30,6 +31,7 @@ from .sparsesolv_knowledge import (
 from .kelvin_knowledge import get_kelvin_documentation
 from .radia_knowledge import get_radia_documentation
 from .ngsolve_knowledge import get_ngsolve_documentation
+from .induction_heating_knowledge import get_induction_heating_documentation
 
 # Create MCP server
 mcp = FastMCP("radia-lint")
@@ -388,6 +390,25 @@ def get_radia_lint_rules() -> str:
             ),
             'fix': 'Build gradient projection via fes.CreateGradient() and apply to preconditioner.',
         },
+        # Induction heating rules
+        {
+            'rule': 'eddy-current-missing-complex',
+            'severity': 'HIGH',
+            'description': (
+                'HCurl/H1 space in eddy current context without complex=True. '
+                'Frequency-domain analysis requires complex-valued FE spaces.'
+            ),
+            'fix': 'Add complex=True: HCurl(mesh, order=2, complex=True)',
+        },
+        {
+            'rule': 'joule-heat-missing-conj',
+            'severity': 'MODERATE',
+            'description': (
+                'Joule heat computed as InnerProduct(E, E) instead of '
+                'InnerProduct(E, Conj(E)). Complex E*E != |E|^2.'
+            ),
+            'fix': 'Use: 0.5 * sigma * InnerProduct(E, Conj(E)).real',
+        },
     ]
 
     lines = ["Radia + NGSolve Lint Rules", "=" * 50, ""]
@@ -744,12 +765,39 @@ def ngsolve_usage(topic: str = "all") -> str:
             "bem"              - Boundary element method (ngbem, LaplaceSL, FEM-BEM coupling)
             "mesh"             - Mesh generation (OCC geometry, STEP import, surface mesh)
             "nonlinear"        - Newton's method for nonlinear problems
-            "pitfalls"         - Common mistakes and how to avoid them (35 items)
+            "pitfalls"         - Common mistakes and how to avoid them (40 items)
             "linalg"           - Vector/matrix operations, NumPy interop
             "formulations"     - EM formulations: A, Omega, A-Phi, T-Omega, Kelvin (EMPY)
             "adaptive"         - Adaptive mesh refinement with ZZ error estimator (EMPY)
     """
     return get_ngsolve_documentation(topic)
+
+
+@mcp.tool()
+def induction_heating(topic: str = "all") -> str:
+    """
+    Get induction heating simulation documentation for NGSolve.
+
+    Complete workflow for electromagnetic induction heating analysis:
+    EM eddy current solve (A-Phi) -> Joule heat computation -> transient
+    thermal analysis, including Gmsh mesh loading, rotating workpiece,
+    VTK output, and post-processing patterns.
+
+    Based on production simulations for industrial induction heating
+    (8 kHz, 7000 A, iron/steel workpiece with copper coil).
+
+    Args:
+        topic: Documentation topic. Options:
+            "all"           - Complete documentation
+            "overview"      - Physics overview, parameters, skin depth
+            "gmsh_mesh"     - ReadGmsh loading, physical groups, boundary layers
+            "eddy_current"  - A-Phi formulation (production code with Gmsh mesh)
+            "thermal"       - Transient heat equation (theta-scheme, material props)
+            "rotating"      - Rotating workpiece (mesh.SetDeformation)
+            "postprocess"   - VTK output, point/line evaluation, CSV/MAT export
+            "pitfalls"      - Common mistakes in induction heating simulation
+    """
+    return get_induction_heating_documentation(topic)
 
 
 def _selftest():
