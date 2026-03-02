@@ -252,6 +252,46 @@ rad.SetRelaxParam(0.3)
 rad.SetNewtonMethod(True)
 rad.SetNewtonDamping(True, max_iter=5, min_omega=0.01)
 ```
+
+## IMA (Image Method of Analysis) Symmetry
+
+IMA exploits mirror symmetry to reduce problem size (half, quarter, eighth model).
+All three solvers (LU, BiCGSTAB, HACApK) support IMA via the `image=` parameter.
+
+```python
+# Quarter model with x-mirror (symmetric) and z-mirror (antisymmetric)
+# For Z-directed field: Bz is parallel to x-plane (+) and perpendicular to z-plane (-)
+rad.Solve(container, 0.001, 100, 2, image='+x-z')
+
+# Pre-build matrix with IMA (optional, for matrix inspection)
+handle = rad.BuildMatrix(model, image='+x-z')
+matrix, dof = rad.GetInteractMatrix(handle)
+```
+
+### IMA Sign Selection Policy
+
+| Field vs Mirror Plane | IMA Sign |
+|----------------------|----------|
+| Field **parallel** to mirror | **+** (symmetric) |
+| Field **perpendicular** to mirror | **-** (antisymmetric) |
+
+### Supported Symmetry Combinations
+
+| `image=` | Reduction | Example |
+|----------|-----------|---------|
+| `'+x'` | Half model | x-mirror only |
+| `'+x-z'` | Quarter model | x + z mirrors |
+| `'+x+y-z'` | Eighth model | x + y + z mirrors |
+
+### IMA Boundary Element Limitation
+
+IMA may produce incorrect results (~0.5x magnitude) for **boundary elements** whose
+faces lie ON the symmetry plane, when observation points are also on that plane.
+
+**When IMA is Safe**:
+- Elements offset from symmetry planes (not touching)
+- Observation points off-plane
+- MMM (tetrahedra) -- no limitation
 """
 
 RADIA_PARALLELIZATION = """
