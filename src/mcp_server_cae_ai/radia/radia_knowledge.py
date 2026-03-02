@@ -254,6 +254,115 @@ rad.SetNewtonDamping(True, max_iter=5, min_omega=0.01)
 ```
 """
 
+RADIA_PARALLELIZATION = """
+# Parallelization Architecture
+
+Radia uses NGSolve's TaskManager for all parallelism. There is no OpenMP dependency.
+The TaskManager is a work-stealing thread pool initialized when `import radia` loads
+ngcore.dll.
+
+## Thread Control
+
+Thread count is determined by the TaskManager. By default, it uses all available cores.
+To control thread count from Python, use NGSolve's API:
+
+```python
+import ngsolve
+ngsolve.SetNumThreads(8)  # Set thread count BEFORE solving
+```
+
+Or equivalently via the `with TaskManager(n)` context manager in NGSolve scripts.
+
+**IMPORTANT**: `import radia` must come BEFORE `import ngsolve`. This is because
+Radia's `__init__.py` imports ngsolve internally for DLL resolution (ngcore.dll),
+which initializes the TaskManager. If ngsolve is imported first with a different
+thread count, there can be conflicts.
+
+## How Each Solver Uses Parallelism
+
+| Solver | Method | Parallelization |
+|--------|--------|-----------------|
+| LU (method=0) | MKL `dgesv_` | `SuspendTaskManager` + `MKLThreadGuard` enables MKL multi-threading |
+| BiCGSTAB (method=1) | Matrix-vector product | `ParallelFor` via TaskManager |
+| HACApK (method=2) | H-matrix build + BiCGSTAB | `ParallelFor` / `ParallelForRange` via TaskManager |
+
+### LU Solver Threading Detail
+
+NGSolve sets `mkl_set_num_threads(1)` globally to prevent conflicts with TaskManager.
+When Radia's LU solver calls `dgesv_`, it uses `MKLThreadGuard` RAII to temporarily
+re-enable multi-threaded MKL, then `SuspendTaskManager` to avoid contention:
+
+```cpp
+// C++ internals (rad_relaxation_methods.cpp)
+{
+    ngcore::SuspendTaskManager stm;          // Pause TaskManager threads
+    radia::MKLThreadGuard mkl_guard(nthreads); // Enable MKL multi-threading
+    dgesv_(&n, &nrhs, A, &n, ipiv, b, &n, &info);
+}   // Both guards restore original state on scope exit
+```
+
+### HACApK (H-Matrix) Threading
+
+H-matrix construction and BiCGSTAB iterations use TaskManager `ParallelFor`:
+- Matrix assembly: parallel over element pairs
+- ACA+ low-rank approximation: parallel over admissible blocks
+- BiCGSTAB matrix-vector product: parallel over H-matrix leaf nodes
+
+## Querying Thread Info
+
+```python
+import radia as rad
+
+# After rad.Solve():
+stats = rad.GetSolveStats()
+print(stats['num_threads'])         # e.g., 8
+print(stats['taskmanager_enabled']) # True
+print(stats['t_matrix_build'])      # Matrix build time [s]
+print(stats['t_linear_solve'])      # Linear solve time [s]
+print(stats['t_lu_decomp'])         # LU decomposition time [s] (LU only)
+print(stats['t_hmatrix_build'])     # H-matrix build time [s] (HACApK only)
+```
+
+## Other Parallelized Operations
+
+| Operation | File | Method |
+|-----------|------|--------|
+| Interaction matrix build | `rad_interaction.cpp` | `ParallelFor` |
+| Field computation (Fld, FldLst) | `rad_field_unified.cpp` | `ParallelFor` |
+| Analytical poly integrals | `rad_poly_analytical.cpp` | `ParallelFor` |
+| FMM field evaluation | `rad_exafmm.cpp` | `ParallelFor` |
+| ExaFMM tree traversal | `exafmm/fmm_scale_invariant.h` | `ParallelFor` |
+
+## NGSolve Compatibility
+
+Since Radia and NGSolve share the same TaskManager, they coexist naturally:
+
+```python
+import radia as rad  # Initializes TaskManager (loads ngcore.dll)
+from ngsolve import *
+
+# Radia solve (uses TaskManager internally)
+rad.Solve(grp, 0.001, 100, 2)
+
+# NGSolve BEM assembly (also uses TaskManager)
+with TaskManager():
+    V_op = LaplaceSL(j_trial.Trace() * ds) * j_test.Trace() * ds
+```
+
+No thread conflict because both use the same underlying TaskManager instance.
+
+## Scaling Benchmarks (8 threads, cube hexahedron nonlinear)
+
+| Solver | Time Scaling | Memory Scaling |
+|--------|-------------|----------------|
+| LU | O(N^3.5) | O(N^1.8) |
+| BiCGSTAB | O(N^2.5) | O(N^1.9) |
+| HACApK | O(N^1.7) | O(N^1.2) |
+
+HACApK achieves near-linear scaling for both time and memory, enabling
+problems with >10,000 elements that would be infeasible with dense solvers.
+"""
+
 RADIA_FIELDS = """
 # Field Computation
 
@@ -436,7 +545,11 @@ ext = rad.ObjBckg([0, 0, B_value])
 
 ## 8. NGSolve Integration
 
-- Import radia BEFORE ngsolve
+- **Import radia BEFORE ngsolve**: Radia's `__init__.py` imports ngsolve
+  internally to locate ngcore.dll and initialize the TaskManager thread pool.
+  If ngsolve is imported first, thread pool configuration may conflict.
+- Radia and NGSolve share the same TaskManager (ngcore), so they coexist
+  without thread conflicts.
 - Use `rad.FldUnits('m')` for SI consistency
 - Use `netgen_mesh_to_radia()` for mesh conversion (not manual extraction)
 
@@ -1270,6 +1383,7 @@ def get_radia_documentation(topic: str = "all") -> str:
         "geometry": RADIA_GEOMETRY,
         "materials": RADIA_MATERIALS,
         "solving": RADIA_SOLVING,
+        "parallelization": RADIA_PARALLELIZATION,
         "fields": RADIA_FIELDS,
         "mesh_import": RADIA_MESH_IMPORT,
         "best_practices": RADIA_BEST_PRACTICES,
