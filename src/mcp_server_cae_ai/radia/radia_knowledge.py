@@ -243,6 +243,9 @@ result = rad.Solve(grp, 0.001, 100, 0)
 rad.SetBiCGSTABTol(1e-4)
 
 # H-matrix parameters (HACApK, method=2)
+# leaf_size: C++ default=32, recommended=10 for MSC 6DOF hexahedra
+# leaf_size=10 → actual leaf up to 11 elements × 6DOF = 66 DOF/leaf
+# Default 32 gives 192 DOF/leaf, too large for effective ACA+ compression
 rad.SetHACApKParams(eps=1e-4, leaf_size=10, eta=2.0)
 
 # Under-relaxation for difficult nonlinear problems
