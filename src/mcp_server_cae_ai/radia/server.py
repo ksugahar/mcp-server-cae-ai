@@ -2,8 +2,9 @@
 Radia Project MCP Server
 
 Provides tools for:
-- Linting Python scripts against Radia + NGSolve conventions (23 rules)
+- Linting Python scripts against Radia + NGSolve conventions (27 rules)
 - Radia BEM library usage documentation
+- GmshBuilder mesh generation API documentation (719 methods, 15 topics incl. CFD techniques)
 - NGSolve FEM usage documentation (12 topics incl. EM formulations, adaptive)
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
 - Kelvin transformation reference for open boundary FEM
@@ -30,6 +31,7 @@ from .radia_knowledge import get_radia_documentation
 from .ngsolve_knowledge import get_ngsolve_documentation
 from .induction_heating_knowledge import get_induction_heating_documentation
 from .md2html_knowledge import get_md2html_documentation
+from .gmsh_builder_knowledge import get_gmsh_builder_documentation
 
 # Create MCP server
 mcp = FastMCP("radia-lint")
@@ -237,6 +239,33 @@ def get_radia_lint_rules() -> str:
             'fix': "Delete the rad.FldUnits() call entirely.",
         },
         {
+            'rule': 'removed-fldbatch',
+            'severity': 'HIGH',
+            'description': (
+                "FldBatch/FldA/FldPhi are removed. Use unified rad.Fld() "
+                "with batch points shape (N,3)."
+            ),
+            'fix': (
+                "Replace rad.FldBatch(obj, pts) with "
+                "np.asarray(rad.Fld(obj, 'b', pts)). "
+                "Replace rad.FldA(obj, pts) with rad.Fld(obj, 'a', pts). "
+                "Replace rad.FldPhi(obj, pts) with rad.Fld(obj, 'phi', pts)."
+            ),
+        },
+        {
+            'rule': 'removed-solver-api',
+            'severity': 'HIGH',
+            'description': (
+                "Old solver parameter APIs (SetHACApKParams, SetBiCGSTABTol, "
+                "SetRelaxParam, SetNewtonMethod, etc.) are removed."
+            ),
+            'fix': (
+                "Use rad.SolverConfig(**kwargs) to set parameters and "
+                "rad.GetSolverConfig() to query them. Example: "
+                "rad.SolverConfig(hacapk_eps=1e-4, hacapk_leaf=10, hacapk_eta=2.0)"
+            ),
+        },
+        {
             'rule': 'docstring-hardcoded-mm',
             'severity': 'MODERATE',
             'description': (
@@ -410,6 +439,42 @@ def get_radia_lint_rules() -> str:
             ),
             'fix': 'Use: 0.5 * sigma * InnerProduct(E, Conj(E)).real',
         },
+        # GmshBuilder rules
+        {
+            'rule': 'gmsh-builder-no-context-manager',
+            'severity': 'HIGH',
+            'description': (
+                'GmshBuilder must be used as a context manager (with statement) '
+                'to ensure GMSH is properly initialized and finalized.'
+            ),
+            'fix': 'Use: with GmshBuilder() as gb: ...',
+        },
+        {
+            'rule': 'gmsh-builder-old-cubit-import',
+            'severity': 'HIGH',
+            'description': (
+                'cubit_mesh / CubitMesh has been renamed to gmsh_builder / GmshBuilder.'
+            ),
+            'fix': 'Use: from radia.gmsh_builder import GmshBuilder',
+        },
+        {
+            'rule': 'gmsh-builder-no-mesh-size',
+            'severity': 'MODERATE',
+            'description': (
+                'generate() called without set_mesh_size() or set_divisions(). '
+                'GMSH uses default sizing which may produce poor quality mesh.'
+            ),
+            'fix': 'Add gb.set_mesh_size(0.005) before gb.generate().',
+        },
+        {
+            'rule': 'gmsh-builder-missing-fragment',
+            'severity': 'MODERATE',
+            'description': (
+                'Multiple geometries exported to Radia without fragment(). '
+                'Volumes must share interfaces via fragment() for correct BEM assembly.'
+            ),
+            'fix': 'Use gb.fragment(vol_ids) before meshing multi-body assemblies.',
+        },
     ]
 
     lines = ["Radia + NGSolve Lint Rules", "=" * 50, ""]
@@ -502,6 +567,7 @@ def radia_usage(topic: str = "all") -> str:
             "fem_verification"    - NGSolve FEM verification results and parameters
             "scalar_potential"    - Phi-reduced scalar potential (Radia source + NGSolve FEM)
             "play_models"         - 6 canonical usage patterns (PM, PM+iron, bkg field, etc.)
+            "hysteresis"          - B-input Play model, energy-based hysteresis (MatEnergyHysteresis)
             "build_and_release"   - Build, CI/CD, wheel build, PyPI publish workflow
     """
     return get_radia_documentation(topic)
@@ -594,6 +660,38 @@ def md2html_usage(topic: str = "all") -> str:
     return get_md2html_documentation(topic)
 
 
+@mcp.tool()
+def gmsh_builder_usage(topic: str = "all") -> str:
+    """
+    Get GmshBuilder mesh generation API documentation.
+
+    GmshBuilder is a high-level wrapper around GMSH's OCC (OpenCASCADE)
+    kernel, providing ~719 methods for geometry creation, boolean ops,
+    mesh control, mesh generation, quality evaluation, and export.
+    Part of the Radia project: from radia.gmsh_builder import GmshBuilder
+
+    Args:
+        topic: Documentation topic. Options:
+            "all"              - Complete documentation
+            "overview"         - Library overview, modules, quick start
+            "geometry"         - Geometry creation (80 methods: box, cylinder, sphere, etc.)
+            "boolean"          - Boolean operations (29 methods: fuse, cut, webcut, etc.)
+            "transforms"       - Transforms (26 methods: translate, rotate, mirror, array)
+            "mesh_control"     - Mesh control (75 methods: size, fields, transfinite, etc.)
+            "generation"       - Mesh generation (48 methods: generate, refine, optimize)
+            "quality"          - Mesh quality (27 methods: Jacobian, aspect ratio, etc.)
+            "mesh_access"      - Mesh access (75 methods: nodes, elements, Jacobian, basis)
+            "physical_groups"  - Physical groups (59 methods: blocks, sidesets, materials)
+            "export"           - Export (29 methods: msh, step, vtk, Radia, NGSolve)
+            "entity_wrappers"  - Entity queries (55 methods: volume/surface/curve/vertex)
+            "advanced"         - Advanced features (110 methods: analysis, groups, views, options)
+            "recipes"          - Practical recipes (C-magnet hex, coil, multi-material)
+            "best_practices"   - Best practices and common pitfalls
+            "cfd_techniques"   - CFD meshing techniques (BL, airfoil, wake, terrain, field composition)
+    """
+    return get_gmsh_builder_documentation(topic)
+
+
 # ============================================================
 # MCP Prompts
 # ============================================================
@@ -640,7 +738,7 @@ def ngsolve_radia_workflow(geometry: str) -> str:
         "2. Set up FEM solve (H1/HCurl/HDiv as appropriate)\n"
         "3. Solve for magnetization M per element\n"
         "4. Convert mesh to Radia objects: netgen_mesh_to_radia(mesh, material=...)\n"
-        "5. Evaluate field at external points: rad.Fld(), rad.FldBatch(), rad.FldVTS()\n\n"
+        "5. Evaluate field at external points: rad.Fld() (single or batch), rad.FldVTS()\n\n"
         "## Workflow B: Radia Source -> NGSolve FEM (Phi-Reduced)\n"
         "Use when Radia computes H_s (source field from magnets or coils) and\n"
         "NGSolve handles the iron/material response via scalar potential.\n\n"
@@ -734,10 +832,11 @@ def radia_api_quick_reference() -> str:
         "- `rad.MatApl(obj, mat)` - Apply material to object\n\n"
         "## Solving\n"
         "- `rad.Solve(obj, precision, max_iter, method)` - method: 0=LU, 1=BiCGSTAB, 2=HACApK\n"
-        "- `rad.SetHACApKParams(eps, leaf_size, eta)` - Default: (1e-4, 10, 2.0)\n\n"
+        "- `rad.SolverConfig(hacapk_eps=1e-4, hacapk_leaf=10, ...)` - Solver parameters\n"
+        "- `rad.GetSolverConfig()` - Query current solver settings\n\n"
         "## Fields\n"
-        "- `rad.Fld(obj, 'b'|'h'|'a'|'phi'|'m', [x,y,z])` - Single point (phi returns scalar)\n"
-        "- `rad.FldBatch(obj, points)` - Batch evaluation (B and H)\n"
+        "- `rad.Fld(obj, 'b'|'h'|'a'|'phi'|'m', point)` - Single point, shape (3,)\n"
+        "- `rad.Fld(obj, 'b'|'h'|'a'|'phi', points)` - Batch, shape (N,3)\n"
         "- `rad.FldVTS(obj, filename, ...)` - VTK structured grid export\n\n"
         "## Cleanup\n"
         "- `rad.UtiDelAll()` - Delete all objects (MUST call at end)\n"
@@ -840,7 +939,7 @@ def radia_play_model(scenario: str) -> str:
         "## Solver Selection\n\n"
         "- N < 500 elements: method=0 (LU)\n"
         "- 500 < N < 2000: method=1 (BiCGSTAB)\n"
-        "- N > 2000: method=2 (HACApK), with `rad.SetHACApKParams(1e-4, 10, 2.0)`\n\n"
+        "- N > 2000: method=2 (HACApK), with `rad.SolverConfig(hacapk_eps=1e-4, hacapk_leaf=10, hacapk_eta=2.0)`\n\n"
         "## Element Types\n\n"
         "- ObjRecMag: optimized rectangular blocks (3 DOF, MMM)\n"
         "- ObjHexahedron: arbitrary hex (6 DOF, MSC) -- better accuracy\n"
@@ -849,21 +948,88 @@ def radia_play_model(scenario: str) -> str:
     )
 
 
+@mcp.prompt()
+def gmsh_builder_mesh(description: str) -> str:
+    """Create a mesh generation script using GmshBuilder."""
+    return (
+        f"Create a mesh generation script using GmshBuilder: {description}\n\n"
+        "## Instructions\n\n"
+        "1. Call `gmsh_builder_usage(topic='recipes')` for practical examples\n"
+        "2. Generate a complete, runnable Python script following these rules:\n"
+        "   - `from radia.gmsh_builder import GmshBuilder`\n"
+        "   - Use `with GmshBuilder(verbose=False) as gb:` context manager\n"
+        "   - All coordinates in meters\n"
+        "   - For hex mesh: use set_divisions() + generate('hex')\n"
+        "   - For tet mesh: use set_mesh_size() + generate('tet')\n"
+        "   - For multi-body: use gb.fragment(vol_ids) before meshing\n"
+        "   - For Radia: use gb.to_radia(mu_r=...) or gb.to_radia_with_materials()\n"
+        "   - For export: gb.export('output.msh')\n\n"
+        "## Hex Meshing Recipe\n\n"
+        "```python\n"
+        "with GmshBuilder(verbose=False) as gb:\n"
+        "    box = gb.add_box([0,0,0], [0.1, 0.02, 0.03])\n"
+        "    parts = gb.webcut_plane(box, 'x', 0.03)  # split for structured mesh\n"
+        "    gb.set_divisions_all(4, 3, 3)\n"
+        "    gb.generate('hex')\n"
+        "    radia_obj = gb.to_radia(mu_r=1000)\n"
+        "```\n"
+    )
+
+
 def _selftest():
-    """Run lint on the project's examples/ and src/radia/ directories."""
+    """Run lint on examples/ directory, or built-in fixtures as fallback.
+
+    When run from a project root that has examples/, lints that directory.
+    Otherwise, uses built-in test fixtures to verify all rules work correctly.
+    This allows --selftest to run in CI without depending on external files.
+    """
     print("=" * 70)
     print("Radia Lint Self-Test")
     print("=" * 70)
     print()
 
     examples_dir = PROJECT_ROOT / "examples"
-    if not examples_dir.exists():
-        print(f"SKIP: examples/ not found at {examples_dir}")
-        print("Run from the project root or a directory containing examples/.")
+    if examples_dir.exists():
+        result = lint_radia_directory("examples", include_src=True)
+        print(result)
         return
 
-    result = lint_radia_directory("examples", include_src=True)
-    print(result)
+    # Fallback: use built-in fixtures from the tests/ directory
+    fixtures_dir = Path(__file__).parent.parent.parent.parent / "tests" / "fixtures"
+    if not fixtures_dir.exists():
+        # Also try installed package location
+        fixtures_dir = Path(__file__).parent / "fixtures"
+
+    if fixtures_dir.exists():
+        print(f"examples/ not found. Using built-in fixtures: {fixtures_dir}")
+        print()
+        py_files = sorted(fixtures_dir.glob("*.py"))
+        total_findings = 0
+        total_files = 0
+        for py_file in py_files:
+            findings = _lint_file(str(py_file))
+            print(_format_findings(str(py_file), findings))
+            print()
+            total_findings += len(findings)
+            total_files += 1
+
+        print("=" * 70)
+        print(f"Summary: {total_findings} finding(s) in {total_files} fixture file(s)")
+
+        # Verify: bad files should have findings, clean file should not
+        for py_file in py_files:
+            findings = _lint_file(str(py_file))
+            name = py_file.name
+            if name.startswith("bad_") and len(findings) == 0:
+                print(f"  WARNING: {name} expected findings but got none")
+            if name.startswith("clean_") and len(findings) > 0:
+                print(f"  FAIL: {name} should be clean but got {len(findings)} finding(s)")
+                sys.exit(1)
+
+        print("Self-test PASSED")
+    else:
+        print(f"SKIP: No examples/ directory and no fixtures found.")
+        print("Run from the project root, or install test fixtures.")
 
 
 def main():
