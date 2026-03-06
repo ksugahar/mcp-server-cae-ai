@@ -44,5 +44,11 @@ Repository = "https://github.com/ksugahar/mcp-server-cae-ai"
 "Radia Project" = "https://github.com/ksugahar/Radia"
 "Cubit Mesh Export" = "https://github.com/ksugahar/Coreform_Cubit_Mesh_Export"
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1298,6 +1298,12 @@ def _selftest():
 	print("=" * 70)
 	print()
 
+	examples_dir = PROJECT_ROOT / "examples"
+	if not examples_dir.exists():
+		print(f"SKIP: examples/ not found at {examples_dir}")
+		print("Run from the project root or a directory containing examples/.")
+		return
+
 	result = lint_cubit_directory("examples")
 	print(result)
 
