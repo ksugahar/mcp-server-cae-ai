@@ -425,29 +425,94 @@ print(f"Integral of solution: {Integrate(gfu, mesh):.6f}")
 # ============================================================
 
 @mcp.tool()
-def cubit_export_docs(format: str = "all") -> str:
+def cubit_docs(topic: str = "all") -> str:
 	"""
-	Get documentation for cubit_mesh_export export functions.
+	Get Cubit documentation: export formats, scripting guide, and API reference.
 
-	Provides API reference, parameter tables, supported element types,
-	and usage examples for each mesh export format.
+	Unified documentation tool covering export functions, Python scripting
+	patterns, and the Cubit API (600+ functions). Use topic prefixes to
+	navigate: export_*, scripting_*, api_*.
 
 	Args:
-	    format: Export format to document. Options:
-	        "all"            - Function overview + format comparison
-	        "overview"       - Function overview table
-	        "gmsh_v2"        - Gmsh v2.2 format (export_Gmsh_ver2)
-	        "gmsh_v4"        - Gmsh v4.1 format (export_Gmsh_ver4)
-	        "netgen"         - Netgen mesh (export_NetgenMesh)
-	        "vtk"            - VTK Legacy format (export_vtk)
-	        "vtu"            - VTK XML format (export_vtu)
-	        "nastran"        - Nastran BDF format (export_Nastran)
-	        "meg"            - MEG ELF/MAGIC format (export_meg)
-	        "exodus"         - Exodus II format (export_exodus)
-	        "comparison"     - Format comparison and decision matrix
-	        "decision_guide" - Interactive decision tree for format selection
+	    topic: Documentation topic. Options:
+	        "all"                    - Overview of all categories
+	        --- Export formats ---
+	        "export_overview"        - Function overview table
+	        "export_gmsh_v2"         - Gmsh v2.2 format
+	        "export_gmsh_v4"         - Gmsh v4.1 format
+	        "export_netgen"          - Netgen mesh format
+	        "export_vtk"             - VTK Legacy format
+	        "export_vtu"             - VTK XML format
+	        "export_nastran"         - Nastran BDF format
+	        "export_meg"             - MEG ELF/MAGIC format
+	        "export_exodus"          - Exodus II format
+	        "export_comparison"      - Format comparison and decision matrix
+	        "export_decision_guide"  - Decision tree for format selection
+	        --- Scripting guide ---
+	        "scripting_overview"     - Why Cubit, element types, workflow
+	        "scripting_blocks"       - Block registration
+	        "scripting_blocks_only_policy" - Why blocks only (no nodesets/sidesets)
+	        "scripting_element_order"  - 1st/2nd order, connectivity APIs
+	        "scripting_mesh_schemes"   - tetmesh, map, sweep, trimesh
+	        "scripting_step_exchange"  - STEP import/export, heal vs noheal
+	        "scripting_initialization" - Cubit Python init boilerplate
+	        "scripting_mixed_elements" - Mixed element types and warnings
+	        "scripting_common_mistakes" - Frequent Cubit API pitfalls
+	        "scripting_hex_workflow"    - Hexahedral mesh generation
+	        "scripting_tet_workflow"    - Tetrahedral mesh generation
+	        "scripting_2d_mesh"         - 2D surface meshing and export
+	        "scripting_troubleshooting" - Common problems and debugging
+	        "scripting_design_philosophy" - Why module reads Python API
+	        "scripting_aprepro_journal"  - Running scripts via play command
+	        --- API reference ---
+	        "api_core"               - cmd, parse_cubit_list, init, naming
+	        "api_geometry_queries"   - center_point, bounding_box, normals
+	        "api_mesh_access"        - connectivity, nodal_coordinates
+	        "api_blocks_sets"        - block/nodeset/sideset/group functions
+	        "api_mesh_settings"      - scheme, size, intervals, quality
+	        "api_entity_classes"     - Volume, Surface, Curve, Vertex
+	        "api_graphics_selection" - Graphics control, selection
+	        "api_advanced"           - Merge detection, geometry analysis
 	"""
-	return get_export_documentation(format)
+	topic = topic.lower().strip()
+
+	if topic == "all":
+		return (
+			"# Cubit Documentation\n\n"
+			"Use topic prefixes to navigate:\n"
+			"- `export_*` - Export format documentation (gmsh_v2, netgen, vtk, etc.)\n"
+			"- `scripting_*` - Python scripting guide (blocks, mesh_schemes, etc.)\n"
+			"- `api_*` - API reference (core, geometry_queries, mesh_access, etc.)\n\n"
+			+ get_export_documentation("overview")
+		)
+
+	# Export topics: strip prefix
+	if topic.startswith("export_"):
+		return get_export_documentation(topic[7:])  # remove "export_"
+
+	# Scripting topics: strip prefix
+	if topic.startswith("scripting_"):
+		return get_cubit_documentation(topic[10:])  # remove "scripting_"
+
+	# API topics: strip prefix
+	if topic.startswith("api_"):
+		return get_api_reference(topic[4:])  # remove "api_"
+
+	# Try without prefix (backward compat for simple names)
+	result = get_export_documentation(topic)
+	if not result.startswith("Unknown"):
+		return result
+	result = get_cubit_documentation(topic)
+	if not result.startswith("Unknown"):
+		return result
+	result = get_api_reference(topic)
+	if not result.startswith("Unknown"):
+		return result
+
+	return (
+		f"Unknown topic: '{topic}'. Use prefixes: export_*, scripting_*, api_*. "
+		f"Examples: export_gmsh_v2, scripting_blocks, api_core"
+	)
 
 
 @mcp.tool()
@@ -510,36 +575,6 @@ def netgen_code_example(shape: str = "cylinder") -> str:
 
 
 @mcp.tool()
-def cubit_scripting_guide(topic: str = "all") -> str:
-	"""
-	Get Cubit Python scripting documentation for mesh generation.
-
-	Covers block registration, element order control, mesh schemes,
-	STEP exchange, initialization, 2D meshing, troubleshooting, and common pitfalls.
-
-	Args:
-	    topic: Documentation topic. Options:
-	        "all"                - Complete scripting guide
-	        "overview"           - Why Cubit, element types, workflow
-	        "blocks"             - Block registration (mesh elements vs geometry)
-	        "blocks_only_policy" - Why blocks only (no nodesets/sidesets)
-	        "element_order"      - 1st/2nd order, connectivity APIs
-	        "mesh_schemes"       - tetmesh, map, sweep, trimesh
-	        "step_exchange"      - STEP import/export, heal vs noheal
-	        "initialization"     - Cubit Python init boilerplate
-	        "mixed_elements"     - Mixed element types and warnings
-	        "common_mistakes"    - Frequent Cubit API pitfalls
-	        "hex_workflow"       - Hexahedral mesh generation
-	        "tet_workflow"       - Tetrahedral mesh generation
-	        "2d_mesh"            - 2D surface meshing and export
-	        "troubleshooting"    - Common problems and debugging
-	        "design_philosophy"  - Why module reads Python API, not built-in export
-	        "aprepro_journal"    - Running scripts from Cubit via play command
-	"""
-	return get_cubit_documentation(topic)
-
-
-@mcp.tool()
 def cubit_forum_tips(topic: str = "all") -> str:
 	"""
 	Get practical Cubit meshing tips sourced from the Coreform forum.
@@ -564,31 +599,10 @@ def cubit_forum_tips(topic: str = "all") -> str:
 	        "quality_diagnostics"  - Quality extraction, bad element selection, normals
 	        "solver_workflows"     - FEniCS, VTK, CalculiX, OpenFOAM integration
 	        "advanced_meshing"     - Void, crack, dome, hemisphere, topography, THex
+
+	    For troubleshooting, use cubit_docs(topic="scripting_troubleshooting").
 	"""
 	return get_forum_tips(topic)
-
-
-@mcp.tool()
-def cubit_api_reference(topic: str = "all") -> str:
-	"""
-	Get the Cubit Python API reference (cubit.* functions and entity classes).
-
-	Organized reference of 600+ CubitInterface namespace functions and
-	entity class methods from the official Coreform Cubit 2025.8 docs.
-
-	Args:
-	    topic: API category. Options:
-	        "all"                  - All API categories
-	        "core"                 - cmd, parse_cubit_list, init, naming, APREPRO
-	        "geometry_queries"     - center_point, bounding_box, normals, topology
-	        "mesh_access"          - connectivity, nodal_coordinates, element access
-	        "blocks_sets"          - block/nodeset/sideset/group functions
-	        "mesh_settings"        - scheme, size, intervals, quality, tetmesh
-	        "entity_classes"       - Volume, Surface, Curve, Vertex class methods
-	        "graphics_selection"   - Graphics control, selection, journaling
-	        "advanced"             - Merge detection, geometry analysis, Sculpt
-	"""
-	return get_api_reference(topic)
 
 
 @mcp.tool()
@@ -1048,24 +1062,6 @@ def generate_cubit_script(workflow: str = "tet_netgen") -> str:
 
 
 @mcp.tool()
-def mesh_quality_guide(topic: str = "all") -> str:
-	"""
-	Get mesh quality checking and improvement documentation.
-
-	Covers Cubit quality metrics, minimum requirements by application,
-	improvement techniques, and common quality issues.
-
-	Args:
-	    topic: Documentation topic. Options:
-	        "all"    - Complete mesh quality guide
-	"""
-	if topic.lower().strip() == "all":
-		return MESH_QUALITY_KNOWLEDGE
-	else:
-		return MESH_QUALITY_KNOWLEDGE
-
-
-@mcp.tool()
 def get_lint_rules() -> str:
 	"""
 	List all available Cubit export lint rules with descriptions.
@@ -1200,26 +1196,95 @@ def get_lint_rules() -> str:
 	return '\n'.join(lines)
 
 
-@mcp.tool()
-def troubleshooting_guide(scenario: str = "all") -> str:
-	"""
-	Get debugging guidance for common Cubit mesh export problems.
+# ============================================================
+# MCP Prompts
+# ============================================================
 
-	Provides diagnosis steps, root causes, and fixes for typical issues
-	encountered when exporting Cubit meshes.
+@mcp.prompt()
+def new_cubit_mesh(geometry: str, element_type: str = "tet") -> str:
+	"""Create a Cubit meshing script for the given geometry."""
+	return (
+		f"Create a Cubit meshing script for: {geometry}\n"
+		f"Element type: {element_type}\n\n"
+		"Follow these conventions:\n"
+		"1. cubit.init(['cubit', '-nojournal', '-batch'])\n"
+		"2. STEP export/reimport cycle for curved surfaces\n"
+		"3. Register blocks with names: block N add {tet|hex} all; block N name '...'\n"
+		"4. Add boundary block: block N add {tri|quad} all\n"
+		"5. Use relative paths for imports\n"
+		"6. Verify volume after curving\n"
+		"7. For Netgen export: use export_netgen(cubit, geometry=geo)\n"
+		"8. For Gmsh 2nd order: set element type tetra10/tri6 and use export_gmsh_v2\n"
+	)
 
-	Args:
-	    scenario: Problem scenario. Options:
-	        "all"                - Complete troubleshooting guide
-	        "empty_export"       - Export produces empty file (0 elements)
-	        "2nd_order"          - 2nd order elements not appearing
-	        "setgeominfo"        - SetGeomInfo produces wrong results
-	        "name_occ"           - name_occ_faces names not found in Cubit
-	        "mesh_quality"       - Mesh quality too low
-	        "module_not_found"   - Python module import errors
-	        "missing_boundary"   - Missing boundary elements in export
-	"""
-	return get_cubit_documentation("troubleshooting")
+
+@mcp.prompt()
+def cubit_to_ngsolve(mesh_file: str) -> str:
+	"""Set up Cubit mesh -> NGSolve high-order FEM workflow."""
+	return (
+		f"Set up a Cubit -> NGSolve high-order workflow for: {mesh_file}\n\n"
+		"Workflow options:\n"
+		"A. Netgen with SetGeomInfo (best accuracy):\n"
+		"   1. Export STEP from Cubit, reimport for seam alignment\n"
+		"   2. export_netgen(cubit, geometry=OCCGeometry(step_file))\n"
+		"   3. set_*_geominfo() for each curved surface type\n"
+		"   4. mesh.Curve(order)\n\n"
+		"B. Gmsh 2nd order (simplest):\n"
+		"   1. Set block element types to tetra10/tri6\n"
+		"   2. export_gmsh_v2(cubit, 'mesh.msh')\n"
+		"   3. Mesh(ReadGmsh('mesh.msh'))\n\n"
+		"C. Name-based workflow (complex geometry):\n"
+		"   1. Create geometry in OCC (not Cubit)\n"
+		"   2. name_occ_faces(shape), WriteStep()\n"
+		"   3. Import STEP with 'noheal'\n"
+		"   4. export_netgen_with_names(cubit, geo)\n"
+	)
+
+
+# ============================================================
+# MCP Resources
+# ============================================================
+
+@mcp.resource("cubit://export-decision")
+def cubit_export_decision_guide() -> str:
+	"""Quick decision guide for choosing Cubit export format."""
+	return (
+		"# Cubit Export Format Decision Guide\n\n"
+		"| Need | Format | Function |\n"
+		"|------|--------|----------|\n"
+		"| NGSolve high-order (best) | Netgen | export_netgen(cubit, geometry=geo) |\n"
+		"| NGSolve 2nd order (simplest) | Gmsh v2 | export_gmsh_v2(cubit, file) |\n"
+		"| ParaView visualization | VTU | export_vtu(cubit, file) |\n"
+		"| General FEM (GMSH API) | Gmsh v4 | export_Gmsh_ver4(cubit, file) |\n"
+		"| Legacy/Nastran solvers | BDF | export_Nastran(cubit, file) |\n"
+		"| Exodus II (Abaqus, etc.) | Exodus | export_exodus(cubit, file) |\n"
+	)
+
+
+@mcp.resource("cubit://element-types")
+def cubit_element_types_reference() -> str:
+	"""Cubit element type reference for block registration."""
+	return (
+		"# Cubit Element Types\n\n"
+		"## 3D Elements\n"
+		"| Type | Nodes | 2nd Order | Cubit Name |\n"
+		"|------|-------|-----------|------------|\n"
+		"| Tetrahedron | 4 | 10 (tetra10) | tet |\n"
+		"| Hexahedron | 8 | 20 (hex20) / 27 (hex27) | hex |\n"
+		"| Wedge | 6 | 15 (wedge15) | wedge |\n"
+		"| Pyramid | 5 | 13 (pyramid13) | pyramid |\n\n"
+		"## 2D Elements\n"
+		"| Type | Nodes | 2nd Order | Cubit Name |\n"
+		"|------|-------|-----------|------------|\n"
+		"| Triangle | 3 | 6 (tri6) | tri |\n"
+		"| Quadrilateral | 4 | 8 (quad8) / 9 (quad9) | quad |\n\n"
+		"## Block Registration Pattern\n"
+		"```python\n"
+		"cubit.cmd('block 1 add tet all')     # Add elements first\n"
+		"cubit.cmd('block 1 element type tetra10')  # Then set type\n"
+		"cubit.cmd('block 1 name \"domain\"')  # Then name\n"
+		"```\n"
+	)
 
 
 # ============================================================

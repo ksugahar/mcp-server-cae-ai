@@ -753,6 +753,203 @@ Requires NGSolve to be discoverable by CMake.
 """
 
 
+SPARSESOLV_EXAMPLE_POISSON = '''# 2D Poisson Problem with ICCG
+from ngsolve import *
+from sparsesolv_ngsolve import SparseSolvSolver
+
+mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
+fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += grad(u) * grad(v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += 2 * pi * pi * sin(pi * x) * sin(pi * y) * v * dx
+f.Assemble()
+
+# Solve with ICCG
+solver = SparseSolvSolver(a.mat, method="ICCG",
+                           freedofs=fes.FreeDofs(),
+                           tol=1e-10, maxiter=2000)
+
+gfu = GridFunction(fes)
+gfu.vec.data = solver * f.vec
+
+result = solver.last_result
+print(f"Converged: {result.converged}, Iterations: {result.iterations}")
+print(f"Final residual: {result.final_residual:.2e}")
+'''
+
+SPARSESOLV_EXAMPLE_CURLCURL = '''# 3D Curl-Curl (Electromagnetic) with Auto-Shift ICCG
+from ngsolve import *
+from netgen.occ import Box, Pnt
+from sparsesolv_ngsolve import SparseSolvSolver
+
+box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
+for face in box.faces:
+    face.name = "outer"
+mesh = Mesh(box.GenerateMesh(maxh=0.4))
+
+fes = HCurl(mesh, order=1, dirichlet="outer", nograds=True)
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += curl(u) * curl(v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += CF((0, 0, 1)) * v * dx
+f.Assemble()
+
+# ICCG with auto-shift for semi-definite curl-curl system
+solver = SparseSolvSolver(a.mat, method="ICCG",
+                           freedofs=fes.FreeDofs(),
+                           tol=1e-8, maxiter=2000, shift=1.0)
+solver.auto_shift = True         # Critical for semi-definite systems
+solver.diagonal_scaling = True   # Improve conditioning
+
+gfu = GridFunction(fes)
+gfu.vec.data = solver * f.vec
+
+result = solver.last_result
+print(f"Converged: {result.converged}, Iterations: {result.iterations}")
+'''
+
+SPARSESOLV_EXAMPLE_EDDY = '''# Complex Eddy Current Problem
+from ngsolve import *
+from netgen.occ import Box, Pnt, OCCGeometry
+from sparsesolv_ngsolve import SparseSolvSolver
+
+box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
+for face in box.faces:
+    face.name = "outer"
+mesh = Mesh(OCCGeometry(box).GenerateMesh(maxh=0.3))
+
+# Complex-valued HCurl space for eddy currents
+fes = HCurl(mesh, order=1, complex=True, dirichlet="outer", nograds=True)
+u, v = fes.TnT()
+
+# Complex-symmetric: curl-curl + j*omega*sigma*mass
+a = BilinearForm(fes)
+a += InnerProduct(curl(u), curl(v)) * dx
+a += 1j * InnerProduct(u, v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += InnerProduct(CF((1, 0, 0)), v) * dx
+f.Assemble()
+
+# Factory auto-dispatches to complex solver
+solver = SparseSolvSolver(a.mat, method="ICCG",
+                           freedofs=fes.FreeDofs(),
+                           tol=1e-8, maxiter=5000,
+                           save_best_result=True)
+
+gfu = GridFunction(fes)
+gfu.vec.data = solver * f.vec
+
+result = solver.last_result
+print(f"Converged: {result.converged}, Iterations: {result.iterations}")
+'''
+
+SPARSESOLV_EXAMPLE_PRECOND = '''# Using IC/SGS Preconditioners with NGSolve CGSolver
+from ngsolve import *
+from ngsolve.krylovspace import CGSolver
+from sparsesolv_ngsolve import ICPreconditioner, SGSPreconditioner
+
+mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
+fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += grad(u) * grad(v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += 1 * v * dx
+f.Assemble()
+
+gfu = GridFunction(fes)
+
+# Option 1: IC preconditioner
+pre_ic = ICPreconditioner(a.mat, freedofs=fes.FreeDofs(), shift=1.05)
+pre_ic.Update()
+inv = CGSolver(a.mat, pre_ic, printrates=True, tol=1e-10, maxiter=2000)
+gfu.vec.data = inv * f.vec
+print(f"IC+CG done")
+
+# Option 2: SGS preconditioner
+pre_sgs = SGSPreconditioner(a.mat, freedofs=fes.FreeDofs())
+pre_sgs.Update()
+inv = CGSolver(a.mat, pre_sgs, printrates=False, tol=1e-10)
+gfu.vec.data = inv * f.vec
+print(f"SGS+CG done")
+'''
+
+SPARSESOLV_EXAMPLE_DIVERGENCE = '''# Divergence Detection and Early Termination
+from ngsolve import *
+from sparsesolv_ngsolve import SparseSolvSolver
+
+mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
+fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += grad(u) * grad(v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += 1 * v * dx
+f.Assemble()
+
+solver = SparseSolvSolver(a.mat, method="CG",
+                           freedofs=fes.FreeDofs(),
+                           tol=1e-12, maxiter=5000)
+solver.divergence_check = True
+solver.divergence_threshold = 10.0   # residual > best * 10 = stagnation
+solver.divergence_count = 20         # stop after 20 bad iterations
+
+gfu = GridFunction(fes)
+result = solver.Solve(f.vec, gfu.vec)
+print(f"Converged: {result.converged}")
+print(f"Iterations: {result.iterations} (max: 5000)")
+print(f"Final residual: {result.final_residual:.2e}")
+'''
+
+SPARSESOLV_EXAMPLE_BDDC = '''# BDDC Preconditioner with CG (mesh-independent convergence)
+from ngsolve import *
+from ngsolve.krylovspace import CGSolver
+from sparsesolv_ngsolve import BDDCPreconditioner
+
+mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
+fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += grad(u) * grad(v) * dx
+a.Assemble()
+
+f = LinearForm(fes)
+f += 1 * v * dx
+f.Assemble()
+
+# BDDC requires BilinearForm + FESpace (not just the matrix)
+pre = BDDCPreconditioner(a, fes, coarse_inverse="sparsecholesky")
+pre.Update()
+
+print(f"Wirebasket DOFs: {pre.num_wirebasket_dofs}")
+print(f"Interface DOFs: {pre.num_interface_dofs}")
+
+# Typically converges in ~2 iterations (mesh-independent!)
+inv = CGSolver(a.mat, pre, tol=1e-10, maxiter=100, printrates=True)
+
+gfu = GridFunction(fes)
+gfu.vec.data = inv * f.vec
+'''
+
+
 def get_full_documentation() -> str:
     """Return complete ngsolve-sparsesolv documentation."""
     return "\n\n".join([
@@ -763,3 +960,33 @@ def get_full_documentation() -> str:
         SPARSESOLV_BEST_PRACTICES,
         SPARSESOLV_BUILD,
     ])
+
+
+def get_sparsesolv_documentation(topic: str = "all") -> str:
+    """Return sparsesolv documentation by topic, including code examples."""
+    topics = {
+        "overview": SPARSESOLV_OVERVIEW,
+        "api": SPARSESOLV_API,
+        "examples": SPARSESOLV_EXAMPLES,
+        "abmc": SPARSESOLV_ABMC,
+        "best_practices": SPARSESOLV_BEST_PRACTICES,
+        "build": SPARSESOLV_BUILD,
+        "example_poisson": SPARSESOLV_EXAMPLE_POISSON,
+        "example_curlcurl": SPARSESOLV_EXAMPLE_CURLCURL,
+        "example_eddy": SPARSESOLV_EXAMPLE_EDDY,
+        "example_precond": SPARSESOLV_EXAMPLE_PRECOND,
+        "example_divergence": SPARSESOLV_EXAMPLE_DIVERGENCE,
+        "example_bddc": SPARSESOLV_EXAMPLE_BDDC,
+    }
+    topic = topic.lower().strip()
+    if topic in ("best-practices", "bestpractices", "tips"):
+        topic = "best_practices"
+    if topic == "all":
+        return get_full_documentation()
+    elif topic in topics:
+        return topics[topic]
+    else:
+        return (
+            f"Unknown topic: '{topic}'. "
+            f"Available: {', '.join(topics.keys())}"
+        )

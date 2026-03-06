@@ -8,6 +8,7 @@ Provides tools for:
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
 - Kelvin transformation reference for open boundary FEM
 - ngsolve-sparsesolv (ICCG) solver documentation
+- md2html converter documentation (MathJax, reference links, styled HTML)
 
 Usage:
     mcp-server-radia              # Start MCP server (stdio transport)
@@ -23,15 +24,12 @@ from mcp.server.fastmcp import FastMCP
 
 # Import rules and knowledge bases
 from .rules import ALL_RULES
-from .sparsesolv_knowledge import (
-    SPARSESOLV_OVERVIEW, SPARSESOLV_API, SPARSESOLV_EXAMPLES,
-    SPARSESOLV_ABMC, SPARSESOLV_BEST_PRACTICES,
-    SPARSESOLV_BUILD, get_full_documentation as get_sparsesolv_docs,
-)
+from .sparsesolv_knowledge import get_sparsesolv_documentation
 from .kelvin_knowledge import get_kelvin_documentation
 from .radia_knowledge import get_radia_documentation
 from .ngsolve_knowledge import get_ngsolve_documentation
 from .induction_heating_knowledge import get_induction_heating_documentation
+from .md2html_knowledge import get_md2html_documentation
 
 # Create MCP server
 mcp = FastMCP("radia-lint")
@@ -54,7 +52,7 @@ def _lint_file(filepath: str) -> list[dict]:
         findings.extend(rule_fn(filepath, lines))
 
     # Sort by severity, then line number
-    severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MODERATE': 2, 'LOW': 3, 'ERROR': -1}
+    severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MODERATE': 2, 'LOW': 3, 'INFO': 4, 'ERROR': -1}
     findings.sort(key=lambda f: (severity_order.get(f['severity'], 9), f['line']))
     return findings
 
@@ -83,7 +81,7 @@ def lint_radia_script(filepath: str) -> str:
     - Missing rad.UtiDelAll() cleanup (HIGH)
     - Hardcoded absolute paths in sys.path (HIGH)
     - EFIE V_LL term with wrong (minus) sign (HIGH)
-    - Missing rad.FldUnits() initialization (MODERATE)
+    - Removed rad.FldUnits() call present (HIGH)
     - PEEC n_seg too low for circular coil coupling (MODERATE)
     - Classical EFIE 1/kappa^2 low-frequency breakdown (MODERATE)
     - PEEC P/(jw) low-frequency breakdown (HIGH)
@@ -93,6 +91,7 @@ def lint_radia_script(filepath: str) -> str:
     NGSolve checks:
     - BEM on HDivSurface without .Trace() (CRITICAL)
     - HCurl magnetostatics without nograds=True (HIGH)
+    - Eddy current FE space missing complex=True (HIGH)
     - BDDC preconditioner registered after assembly (MODERATE)
     - Overwriting x/y/z coordinate variables (MODERATE)
     - Direct .vec assignment without .data (MODERATE)
@@ -101,6 +100,7 @@ def lint_radia_script(filepath: str) -> str:
     - Kelvin domain without bonus_intorder (MODERATE)
     - VectorH1 for electromagnetic fields (MODERATE)
     - PINVIT/LOBPCG without gradient projection (MODERATE)
+    - Joule heat missing Conj() for complex fields (MODERATE)
 
     Args:
         filepath: Absolute or relative path to the Python file to check.
@@ -158,7 +158,7 @@ def lint_radia_directory(directory: str = "examples", include_src: bool = False)
     # Lint all files
     total_findings = 0
     file_results = []
-    summary_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MODERATE': 0, 'LOW': 0}
+    summary_by_severity = {'CRITICAL': 0, 'HIGH': 0, 'MODERATE': 0, 'LOW': 0, 'INFO': 0}
 
     for py_file in py_files:
         findings = _lint_file(str(py_file))
@@ -178,7 +178,8 @@ def lint_radia_directory(directory: str = "examples", include_src: bool = False)
         f"Summary: {summary_by_severity['CRITICAL']} CRITICAL, "
         f"{summary_by_severity['HIGH']} HIGH, "
         f"{summary_by_severity['MODERATE']} MODERATE, "
-        f"{summary_by_severity['LOW']} LOW",
+        f"{summary_by_severity['LOW']} LOW, "
+        f"{summary_by_severity['INFO']} INFO",
         "",
     ]
 
@@ -227,13 +228,13 @@ def get_radia_lint_rules() -> str:
             'fix': 'Use os.path.join(os.path.dirname(__file__), "relative/path").',
         },
         {
-            'rule': 'missing-fldunits',
-            'severity': 'MODERATE',
+            'rule': 'removed-fldunits',
+            'severity': 'HIGH',
             'description': (
-                "Example scripts should call rad.FldUnits('m') at initialization "
-                "for consistency with NGSolve and project convention."
+                "rad.FldUnits() has been removed. Radia always uses meters. "
+                "Delete all FldUnits() calls."
             ),
-            'fix': "Add rad.FldUnits('m') after import radia as rad.",
+            'fix': "Delete the rad.FldUnits() call entirely.",
         },
         {
             'rule': 'docstring-hardcoded-mm',
@@ -422,9 +423,9 @@ def get_radia_lint_rules() -> str:
 
 
 @mcp.tool()
-def sparsesolv_usage(topic: str = "all") -> str:
+def sparsesolv(topic: str = "all") -> str:
     """
-    Get ngsolve-sparsesolv usage documentation.
+    Get ngsolve-sparsesolv documentation and code examples.
 
     ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
     that provides IC, SGS, and BDDC preconditioners with ICCG, SGSMRTR,
@@ -434,260 +435,22 @@ def sparsesolv_usage(topic: str = "all") -> str:
     Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 
     Args:
-        topic: Documentation topic to retrieve. Options:
-            "all"            - Complete documentation
-            "overview"       - Library overview, add-on positioning, features
-            "api"            - Python API reference (solvers, preconditioners, BDDC)
-            "examples"       - Usage examples (Poisson, curl-curl, complex, BDDC, etc.)
-            "abmc"           - ABMC ordering: parallel triangular solve optimization
-            "best_practices" - Preconditioner selection, complex systems, tips
-            "build"          - Build and installation instructions
+        topic: Documentation topic or code example. Options:
+            "all"              - Complete documentation
+            "overview"         - Library overview, add-on positioning, features
+            "api"              - Python API reference (solvers, preconditioners, BDDC)
+            "examples"         - Usage examples (Poisson, curl-curl, complex, BDDC, etc.)
+            "abmc"             - ABMC ordering: parallel triangular solve optimization
+            "best_practices"   - Preconditioner selection, complex systems, tips
+            "build"            - Build and installation instructions
+            "example_poisson"  - Ready-to-run: 2D Poisson with ICCG
+            "example_curlcurl" - Ready-to-run: 3D curl-curl with auto-shift IC
+            "example_eddy"     - Ready-to-run: Complex eddy current problem
+            "example_precond"  - Ready-to-run: IC/SGS with NGSolve CGSolver
+            "example_divergence" - Ready-to-run: Divergence detection
+            "example_bddc"     - Ready-to-run: BDDC preconditioner with CG
     """
-    topic = topic.lower().strip()
-    if topic == "all":
-        return get_sparsesolv_docs()
-    elif topic == "overview":
-        return SPARSESOLV_OVERVIEW
-    elif topic == "api":
-        return SPARSESOLV_API
-    elif topic == "examples":
-        return SPARSESOLV_EXAMPLES
-    elif topic == "abmc":
-        return SPARSESOLV_ABMC
-    elif topic in ("best_practices", "best-practices", "bestpractices", "tips"):
-        return SPARSESOLV_BEST_PRACTICES
-    elif topic == "build":
-        return SPARSESOLV_BUILD
-    else:
-        return (
-            f"Unknown topic: '{topic}'. "
-            "Available topics: all, overview, api, examples, abmc, best_practices, build"
-        )
-
-
-@mcp.tool()
-def sparsesolv_code_example(problem_type: str = "poisson") -> str:
-    """
-    Get a ready-to-use ngsolve-sparsesolv code example.
-
-    Args:
-        problem_type: Type of problem. Options:
-            "poisson"     - 2D Poisson with ICCG
-            "curlcurl"    - 3D curl-curl with auto-shift IC (electromagnetic)
-            "eddy"        - Complex eddy current problem
-            "precond"     - Using IC/SGS preconditioners with NGSolve CGSolver
-            "divergence"  - Divergence detection example
-            "bddc"        - BDDC preconditioner with CG
-    """
-    problem_type = problem_type.lower().strip()
-
-    if problem_type == "poisson":
-        return '''# 2D Poisson Problem with ICCG
-from ngsolve import *
-from sparsesolv_ngsolve import SparseSolvSolver
-
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
-fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += 2 * pi * pi * sin(pi * x) * sin(pi * y) * v * dx
-f.Assemble()
-
-# Solve with ICCG
-solver = SparseSolvSolver(a.mat, method="ICCG",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-10, maxiter=2000)
-
-gfu = GridFunction(fes)
-gfu.vec.data = solver * f.vec
-
-result = solver.last_result
-print(f"Converged: {result.converged}, Iterations: {result.iterations}")
-print(f"Final residual: {result.final_residual:.2e}")
-'''
-
-    elif problem_type == "curlcurl":
-        return '''# 3D Curl-Curl (Electromagnetic) with Auto-Shift ICCG
-from ngsolve import *
-from netgen.occ import Box, Pnt
-from sparsesolv_ngsolve import SparseSolvSolver
-
-box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
-for face in box.faces:
-    face.name = "outer"
-mesh = Mesh(box.GenerateMesh(maxh=0.4))
-
-fes = HCurl(mesh, order=1, dirichlet="outer", nograds=True)
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += curl(u) * curl(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += CF((0, 0, 1)) * v * dx
-f.Assemble()
-
-# ICCG with auto-shift for semi-definite curl-curl system
-solver = SparseSolvSolver(a.mat, method="ICCG",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-8, maxiter=2000, shift=1.0)
-solver.auto_shift = True         # Critical for semi-definite systems
-solver.diagonal_scaling = True   # Improve conditioning
-
-gfu = GridFunction(fes)
-gfu.vec.data = solver * f.vec
-
-result = solver.last_result
-print(f"Converged: {result.converged}, Iterations: {result.iterations}")
-'''
-
-    elif problem_type == "eddy":
-        return '''# Complex Eddy Current Problem
-from ngsolve import *
-from netgen.occ import Box, Pnt, OCCGeometry
-from sparsesolv_ngsolve import SparseSolvSolver
-
-box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
-for face in box.faces:
-    face.name = "outer"
-mesh = Mesh(OCCGeometry(box).GenerateMesh(maxh=0.3))
-
-# Complex-valued HCurl space for eddy currents
-fes = HCurl(mesh, order=1, complex=True, dirichlet="outer", nograds=True)
-u, v = fes.TnT()
-
-# Complex-symmetric: curl-curl + j*omega*sigma*mass
-a = BilinearForm(fes)
-a += InnerProduct(curl(u), curl(v)) * dx
-a += 1j * InnerProduct(u, v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += InnerProduct(CF((1, 0, 0)), v) * dx
-f.Assemble()
-
-# Factory auto-dispatches to complex solver
-solver = SparseSolvSolver(a.mat, method="ICCG",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-8, maxiter=5000,
-                           save_best_result=True)
-
-gfu = GridFunction(fes)
-gfu.vec.data = solver * f.vec
-
-result = solver.last_result
-print(f"Converged: {result.converged}, Iterations: {result.iterations}")
-'''
-
-    elif problem_type == "precond":
-        return '''# Using IC/SGS Preconditioners with NGSolve CGSolver
-from ngsolve import *
-from ngsolve.krylovspace import CGSolver
-from sparsesolv_ngsolve import ICPreconditioner, SGSPreconditioner
-
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
-fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += 1 * v * dx
-f.Assemble()
-
-gfu = GridFunction(fes)
-
-# Option 1: IC preconditioner
-pre_ic = ICPreconditioner(a.mat, freedofs=fes.FreeDofs(), shift=1.05)
-pre_ic.Update()
-inv = CGSolver(a.mat, pre_ic, printrates=True, tol=1e-10, maxiter=2000)
-gfu.vec.data = inv * f.vec
-print(f"IC+CG done")
-
-# Option 2: SGS preconditioner
-pre_sgs = SGSPreconditioner(a.mat, freedofs=fes.FreeDofs())
-pre_sgs.Update()
-inv = CGSolver(a.mat, pre_sgs, printrates=False, tol=1e-10)
-gfu.vec.data = inv * f.vec
-print(f"SGS+CG done")
-'''
-
-    elif problem_type == "divergence":
-        return '''# Divergence Detection and Early Termination
-from ngsolve import *
-from sparsesolv_ngsolve import SparseSolvSolver
-
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
-fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += 1 * v * dx
-f.Assemble()
-
-solver = SparseSolvSolver(a.mat, method="CG",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-12, maxiter=5000)
-solver.divergence_check = True
-solver.divergence_threshold = 10.0   # residual > best * 10 = stagnation
-solver.divergence_count = 20         # stop after 20 bad iterations
-
-gfu = GridFunction(fes)
-result = solver.Solve(f.vec, gfu.vec)
-print(f"Converged: {result.converged}")
-print(f"Iterations: {result.iterations} (max: 5000)")
-print(f"Final residual: {result.final_residual:.2e}")
-'''
-
-    elif problem_type == "bddc":
-        return '''# BDDC Preconditioner with CG (mesh-independent convergence)
-from ngsolve import *
-from ngsolve.krylovspace import CGSolver
-from sparsesolv_ngsolve import BDDCPreconditioner
-
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
-fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += 1 * v * dx
-f.Assemble()
-
-# BDDC requires BilinearForm + FESpace (not just the matrix)
-pre = BDDCPreconditioner(a, fes, coarse_inverse="sparsecholesky")
-pre.Update()
-
-print(f"Wirebasket DOFs: {pre.num_wirebasket_dofs}")
-print(f"Interface DOFs: {pre.num_interface_dofs}")
-
-# Typically converges in ~2 iterations (mesh-independent!)
-inv = CGSolver(a.mat, pre, tol=1e-10, maxiter=100, printrates=True)
-
-gfu = GridFunction(fes)
-gfu.vec.data = inv * f.vec
-'''
-
-    else:
-        return (
-            f"Unknown problem type: '{problem_type}'. "
-            "Available: poisson, curlcurl, eddy, precond, divergence, bddc"
-        )
+    return get_sparsesolv_documentation(topic)
 
 
 @mcp.tool()
@@ -724,18 +487,21 @@ def radia_usage(topic: str = "all") -> str:
 
     Args:
         topic: Documentation topic. Options:
-            "all"              - Complete documentation
-            "overview"         - Library overview and workflow
-            "geometry"         - Geometry creation (ObjHexahedron, ObjRecMag, etc.)
-            "materials"        - Material definition (MatLin, MatSatIsoFrm, etc.)
-            "solving"          - Solver usage (rad.Solve, method selection)
-            "fields"           - Field computation (rad.Fld, FldLst, FldInt)
-            "mesh_import"      - NGSolve/GMSH/Cubit mesh import
-            "best_practices"   - Common patterns and pitfalls
-            "peec"             - PEEC conductor analysis (FastHenry, topology, SIBC)
-            "ngbem_peec"           - PEEC with ngbem: Loop-Star, shield BEM+SIBC, stabilized EFIE
+            "all"                 - Complete documentation
+            "overview"            - Library overview and workflow
+            "geometry"            - Geometry creation (ObjHexahedron, ObjRecMag, etc.)
+            "materials"           - Material definition (MatLin, MatSatIsoFrm, etc.)
+            "solving"             - Solver usage (rad.Solve, method selection)
+            "parallelization"     - NGSolve TaskManager parallelization
+            "fields"              - Field computation (rad.Fld, FldLst, FldInt)
+            "mesh_import"         - NGSolve/GMSH/Cubit mesh import
+            "best_practices"      - Common patterns and pitfalls
+            "peec"                - PEEC conductor analysis (FastHenry, topology, SIBC)
+            "ngbem_peec"          - PEEC with ngbem: Loop-Star, shield BEM+SIBC, stabilized EFIE
             "efie_preconditioner" - Calderon preconditioner for EFIE (Andriulli/Schoeberl)
             "fem_verification"    - NGSolve FEM verification results and parameters
+            "scalar_potential"    - Phi-reduced scalar potential (Radia source + NGSolve FEM)
+            "play_models"         - 6 canonical usage patterns (PM, PM+iron, bkg field, etc.)
     """
     return get_radia_documentation(topic)
 
@@ -798,6 +564,288 @@ def induction_heating(topic: str = "all") -> str:
             "pitfalls"      - Common mistakes in induction heating simulation
     """
     return get_induction_heating_documentation(topic)
+
+
+@mcp.tool()
+def md2html_usage(topic: str = "all") -> str:
+    """
+    Get md2html converter documentation.
+
+    md2html.py is a Markdown-to-HTML converter with MathJax support,
+    reference link handling, and styled output. Installed at:
+    C:/Program Files/Python312/Scripts/md2html.py
+
+    Key features:
+    - MathJax LaTeX math ($...$, $$...$$, ```math blocks)
+    - Math protection: shields LaTeX from markdown processing
+    - ||...|| norm notation auto-converted to \\Vert in math
+    - [N] reference links with anchor scrolling to numbered references
+    - UTF-8 with cp932 fallback (Japanese Windows)
+    - Styled HTML output (dark code blocks, blue tables, responsive)
+
+    Args:
+        topic: Documentation topic. Options:
+            "all"            - Complete documentation
+            "usage"          - Command-line usage and features list
+            "implementation" - Architecture, functions, template, CSS details
+            "tips"           - LaTeX math patterns, troubleshooting
+    """
+    return get_md2html_documentation(topic)
+
+
+# ============================================================
+# MCP Prompts
+# ============================================================
+
+@mcp.prompt()
+def new_radia_example(description: str) -> str:
+    """Create a new Radia example script following all project conventions."""
+    return (
+        f"Create a new Radia example script: {description}\n\n"
+        "Follow these conventions:\n"
+        "1. Call rad.UtiDelAll() at the end\n"
+        "3. Use snake_case naming with demo_ prefix\n"
+        "4. Use relative path imports: sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src/radia'))\n"
+        "5. Export VTK output with same basename as script\n"
+        "6. Magnetization in A/m (not Tesla): M = Br / mu_0\n"
+        "7. No hardcoded absolute paths\n"
+        "8. No Unicode symbols in print statements (use ASCII: ^2, ->, <=)\n"
+        "9. Place output files next to the script\n"
+        "10. Use rad.ObjBckg(lambda p: [Bx, By, Bz]) for background field (callable, not list)\n"
+    )
+
+
+@mcp.prompt()
+def lint_project() -> str:
+    """Lint all Python scripts in the Radia project for convention violations."""
+    return (
+        "Run the lint_radia_directory tool on 'examples' with include_src=True.\n"
+        "Report:\n"
+        "1. Total files scanned and issues found\n"
+        "2. CRITICAL issues (must fix immediately)\n"
+        "3. HIGH issues (should fix)\n"
+        "4. Summary of patterns (recurring issues across files)\n"
+        "5. Suggested fixes for the most common issues\n"
+    )
+
+
+@mcp.prompt()
+def ngsolve_radia_workflow(geometry: str) -> str:
+    """Set up NGSolve mesh -> Radia open boundary evaluation workflow."""
+    return (
+        f"Set up an NGSolve -> Radia open boundary field evaluation workflow for: {geometry}\n\n"
+        "## Workflow A: NGSolve FEM -> Radia Open Boundary\n"
+        "1. Create/import geometry in NGSolve (OCC or GMSH)\n"
+        "2. Set up FEM solve (H1/HCurl/HDiv as appropriate)\n"
+        "3. Solve for magnetization M per element\n"
+        "4. Convert mesh to Radia objects: netgen_mesh_to_radia(mesh, material=...)\n"
+        "5. Evaluate field at external points: rad.Fld(), rad.FldBatch(), rad.FldVTS()\n\n"
+        "## Workflow B: Radia Source -> NGSolve FEM (Phi-Reduced)\n"
+        "Use when Radia computes H_s (source field from magnets or coils) and\n"
+        "NGSolve handles the iron/material response via scalar potential.\n\n"
+        "1. Build source in Radia (permanent magnet or coil via equivalent magnetization)\n"
+        "2. Create NGSolve mesh with labeled iron regions\n"
+        "3. Use ScalarPotentialSolver:\n"
+        "   ```python\n"
+        "   from radia.scalar_potential_solver import ScalarPotentialSolver\n"
+        "   solver = ScalarPotentialSolver(mesh, iron_domains='iron', mu_r=1000)\n"
+        "   solver.set_source_from_radia(radia_obj, resolution=31)\n"
+        "   solver.solve()  # 'single' for mu_r<5000, 'two' for higher\n"
+        "   B = solver.get_B()  # CoefficientFunction\n"
+        "   ```\n"
+        "4. For coils: model winding as ObjRecMag with M_z = NI/h (A/m)\n\n"
+        "Key rules:\n"
+        "- Radia always uses meters (no FldUnits call needed)\n"
+        "- Use proper Radia objects (ObjHexahedron/ObjTetrahedron), NOT dipole approximation\n"
+        "- No Solve() needed if M is already known from NGSolve\n"
+        "- For HDiv: use order=2 for best accuracy\n"
+        "- Coil equivalent magnetization: M = NI/h along coil axis\n"
+    )
+
+
+@mcp.prompt()
+def coil_scalar_potential(description: str) -> str:
+    """Set up coil + iron core with phi-reduced scalar potential method."""
+    return (
+        f"Set up a coil + iron core simulation using phi-reduced scalar potential: {description}\n\n"
+        "## Physics\n"
+        "The phi-reduced method (Simkin-Trowbridge 1979) splits H into:\n"
+        "  H = H_s - grad(phi)\n"
+        "where H_s is the source field (coil) computed by Radia, and phi is\n"
+        "the correction potential from NGSolve FEM that accounts for iron.\n\n"
+        "## Coil Modeling in Radia\n"
+        "A solenoid with N turns, current I, height h is modeled as\n"
+        "uniformly magnetized blocks with M_z = N*I/h (A/m).\n"
+        "For a hollow rectangular coil, decompose into 4 wall blocks:\n"
+        "```python\n"
+        "M_z = N * I / h  # Equivalent magnetization\n"
+        "left  = rad.ObjRecMag([-(a_in+a_out)/2, 0, 0], [a_out-a_in, outer, h], [0,0,M_z])\n"
+        "right = rad.ObjRecMag([ (a_in+a_out)/2, 0, 0], [a_out-a_in, outer, h], [0,0,M_z])\n"
+        "front = rad.ObjRecMag([0, (a_in+a_out)/2, 0], [bore, a_out-a_in, h], [0,0,M_z])\n"
+        "back  = rad.ObjRecMag([0,-(a_in+a_out)/2, 0], [bore, a_out-a_in, h], [0,0,M_z])\n"
+        "coil = rad.ObjCnt([left, right, front, back])\n"
+        "```\n\n"
+        "## Solver Selection\n"
+        "- mu_r < 5000: use solve(method='single') -- single reduced potential\n"
+        "- mu_r >= 5000: use solve(method='two') -- two-potential (Simkin-Trowbridge)\n\n"
+        "## Example: examples/ngsolve_integration/demo_coil_scalar_potential.py\n"
+        "## Reference: Simkin & Trowbridge, IJNME, vol.14, pp.423-440, 1979\n"
+    )
+
+
+# ============================================================
+# MCP Resources
+# ============================================================
+
+@mcp.resource("radia://units")
+def radia_units_reference() -> str:
+    """Radia unit system quick reference."""
+    return (
+        "# Radia Unit System\n\n"
+        "| Quantity | Unit | Notes |\n"
+        "|----------|------|-------|\n"
+        "| Length | meters | Always meters, no config needed |\n"
+        "| B field | Tesla | |\n"
+        "| H field | A/m | |\n"
+        "| M (magnetization) | A/m | M = Br / mu_0 (e.g., Br=1.2T -> M=954930 A/m) |\n"
+        "| A (vector potential) | T*m | |\n"
+        "| mu_0 | 4*pi*1e-7 T*m/A | |\n"
+        "| mu_0/(4*pi) | 1e-7 T*m/A | Used in Green's function |\n\n"
+        "**CRITICAL**: M is in A/m, NOT Tesla. Do NOT confuse with J (magnetic polarization, Tesla): J = mu_0 * M.\n"
+    )
+
+
+@mcp.resource("radia://api-quick")
+def radia_api_quick_reference() -> str:
+    """Radia API quick reference card."""
+    return (
+        "# Radia API Quick Reference\n\n"
+        "## Geometry\n"
+        "- `rad.ObjRecMag(center, dimensions, magnetization)` - Rectangular magnet\n"
+        "- `rad.ObjHexahedron(vertices_8, magnetization)` - Arbitrary hexahedron\n"
+        "- `rad.ObjTetrahedron(vertices_4, magnetization)` - Tetrahedron\n"
+        "- `rad.ObjWedge(vertices_6, magnetization)` - Wedge\n"
+        "- `rad.ObjCnt([obj1, obj2, ...])` - Container\n"
+        "- `rad.ObjBckg(callable)` - Background field (MUST be callable)\n\n"
+        "## Materials\n"
+        "- `rad.MatLin(mu_r)` - Linear isotropic (single arg)\n"
+        "- `rad.MatSatIsoTab([[H, B], ...])` - Nonlinear B-H curve\n"
+        "- `rad.MatApl(obj, mat)` - Apply material to object\n\n"
+        "## Solving\n"
+        "- `rad.Solve(obj, precision, max_iter, method)` - method: 0=LU, 1=BiCGSTAB, 2=HACApK\n"
+        "- `rad.SetHACApKParams(eps, leaf_size, eta)` - Default: (1e-4, 10, 2.0)\n\n"
+        "## Fields\n"
+        "- `rad.Fld(obj, 'b'|'h'|'a'|'m', [x,y,z])` - Single point\n"
+        "- `rad.FldBatch(obj, points, nthreads)` - Batch evaluation\n"
+        "- `rad.FldVTS(obj, filename, ...)` - VTK structured grid export\n\n"
+        "## Cleanup\n"
+        "- `rad.UtiDelAll()` - Delete all objects (MUST call at end)\n"
+    )
+
+
+@mcp.resource("radia://materials")
+def radia_materials_reference() -> str:
+    """Radia material specification quick reference."""
+    return (
+        "# Radia Material Specification\n\n"
+        "## Permanent Magnets (fixed M, no Solve needed)\n"
+        "```python\n"
+        "# Specify M directly in A/m\n"
+        "pm = rad.ObjHexahedron(vertices, [0, 0, 954930])  # Br=1.2T -> M=954930\n"
+        "B = rad.Fld(pm, 'b', [0, 0, 0.1])  # No Solve() needed\n"
+        "```\n\n"
+        "## Linear Soft Iron\n"
+        "```python\n"
+        "mat = rad.MatLin(1000)  # mu_r = 1000\n"
+        "rad.MatApl(iron_obj, mat)\n"
+        "```\n\n"
+        "## Nonlinear Soft Iron (B-H curve)\n"
+        "```python\n"
+        "BH = [[0, 0], [100, 0.1], [1000, 1.2], [50000, 2.0]]  # [H(A/m), B(T)]\n"
+        "mat = rad.MatSatIsoTab(BH)\n"
+        "rad.MatApl(iron_obj, mat)\n"
+        "```\n\n"
+        "## PM + Soft Iron (requires Solve)\n"
+        "```python\n"
+        "assembly = rad.ObjCnt([pm, iron])\n"
+        "rad.Solve(assembly, 0.0001, 1000, 0)  # 0=LU\n"
+        "```\n"
+    )
+
+
+@mcp.resource("radia://play-models")
+def radia_play_models_reference() -> str:
+    """Radia play model patterns quick reference."""
+    return (
+        "# Radia Play Models (Typical Usage Patterns)\n\n"
+        "| Pattern | Description | Solve? | Solver |\n"
+        "|---------|-------------|--------|--------|\n"
+        "| A: PM only | ObjRecMag/ObjHexahedron + fixed M | No | - |\n"
+        "| B: PM + Iron | PM + MatLin soft iron | Yes | LU (small) |\n"
+        "| C: Iron + BkgField | ObjBckg(callable) + MatLin | Yes | LU/BiCG |\n"
+        "| D: Nonlinear | MatSatIsoTab B-H curve | Yes | +RelaxParam |\n"
+        "| E: Mixed mesh | Hex(6DOF) + Tet(3DOF) via mesh import | Yes | BiCG/HACApK |\n"
+        "| F: Large-scale | N>2000, HACApK method=2 | Yes | HACApK |\n\n"
+        "## A: PM Only (No Solve)\n"
+        "```python\n"
+        "rad.UtiDelAll()\n"
+        "mag = rad.ObjRecMag([0,0,0], [0.02,0.02,0.01], [0,0,954930])\n"
+        "B = rad.Fld(mag, 'b', [0,0,0.03])  # No Solve needed\n"
+        "rad.UtiDelAll()\n"
+        "```\n\n"
+        "## B: PM + Soft Iron\n"
+        "```python\n"
+        "rad.UtiDelAll()\n"
+        "pm = rad.ObjRecMag([0,0,0], [0.02,0.02,0.01], [0,0,954930])\n"
+        "iron = rad.ObjRecMag([0,0,0.015], [0.03,0.03,0.01], [0,0,0])\n"
+        "rad.MatApl(iron, rad.MatLin(1000))\n"
+        "grp = rad.ObjCnt([pm, iron])\n"
+        "rad.Solve(grp, 0.0001, 1000, 0)\n"
+        "rad.UtiDelAll()\n"
+        "```\n\n"
+        "## C: Iron in Background Field\n"
+        "```python\n"
+        "import numpy as np\n"
+        "MU_0 = 4 * np.pi * 1e-7\n"
+        "rad.UtiDelAll()\n"
+        "iron = rad.ObjRecMag([0,0,0], [0.02,0.02,0.02], [0,0,0])\n"
+        "rad.MatApl(iron, rad.MatLin(1000))\n"
+        "bkg = rad.ObjBckg(lambda p: [0, 0, MU_0 * 200000])  # callable!\n"
+        "grp = rad.ObjCnt([iron, bkg])\n"
+        "rad.Solve(grp, 0.001, 100, 0)\n"
+        "rad.UtiDelAll()\n"
+        "```\n\n"
+        "Use `radia_usage(topic='play_models')` for all 6 patterns with details.\n"
+    )
+
+
+@mcp.prompt()
+def radia_play_model(scenario: str) -> str:
+    """Generate a Radia play model script for a given physical scenario."""
+    return (
+        f"Create a Radia play model script for: {scenario}\n\n"
+        "## Instructions\n\n"
+        "1. Call `radia_usage(topic='play_models')` to see the 6 canonical patterns\n"
+        "2. Choose the best matching pattern for the scenario\n"
+        "3. Generate a complete, runnable Python script following these rules:\n"
+        "   - `import radia as rad` with proper sys.path\n"
+        "   - All coordinates in meters\n"
+        "   - M in A/m (not Tesla): M = Br / (4*pi*1e-7)\n"
+        "   - `rad.UtiDelAll()` at start AND end\n"
+        "   - `rad.ObjBckg(callable)` -- MUST be callable, not list\n"
+        "   - No `rad.FldUnits()` call (removed)\n"
+        "   - ASCII only in print statements (no Unicode)\n"
+        "   - Export VTS with `rad.FldVTS()` using script basename\n\n"
+        "## Solver Selection\n\n"
+        "- N < 500 elements: method=0 (LU)\n"
+        "- 500 < N < 2000: method=1 (BiCGSTAB)\n"
+        "- N > 2000: method=2 (HACApK), with `rad.SetHACApKParams(1e-4, 10, 2.0)`\n\n"
+        "## Element Types\n\n"
+        "- ObjRecMag: optimized rectangular blocks (3 DOF, MMM)\n"
+        "- ObjHexahedron: arbitrary hex (6 DOF, MSC) -- better accuracy\n"
+        "- ObjTetrahedron: tet (3 DOF, MMM) -- unstructured meshes\n"
+        "- For complex geometry: use netgen_mesh_to_radia() or gmsh_to_radia()\n"
+    )
 
 
 def _selftest():

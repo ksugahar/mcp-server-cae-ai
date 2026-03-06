@@ -87,28 +87,24 @@ def check_hardcoded_absolute_paths(filepath: str, lines: List[str]) -> List[Dict
     return findings
 
 
-def check_missing_fldunits(filepath: str, lines: List[str]) -> List[Dict]:
-    """MODERATE: Example scripts should set rad.FldUnits('m')."""
+def check_removed_fldunits(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: rad.FldUnits() has been removed. Radia always uses meters."""
     findings = []
-    has_radia = any('import radia' in line or 'import rad' in line for line in lines)
-    if not has_radia:
-        return findings
-
-    # Only check example scripts
-    if 'examples' not in filepath.replace('\\', '/'):
-        return findings
-
-    has_fldunits = any('FldUnits' in line for line in lines)
-    if not has_fldunits:
-        findings.append({
-            'line': 1,
-            'severity': 'MODERATE',
-            'rule': 'missing-fldunits',
-            'message': (
-                "Example script should call rad.FldUnits('m') at initialization. "
-                "See Unit System Policy in CLAUDE.md."
-            ),
-        })
+    pattern = re.compile(r'(?:rad\.)?FldUnits\s*\(')
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if pattern.search(stripped):
+            findings.append({
+                'line': i,
+                'severity': 'HIGH',
+                'rule': 'removed-fldunits',
+                'message': (
+                    'rad.FldUnits() has been removed. Radia always uses meters. '
+                    'Delete this call.'
+                ),
+            })
     return findings
 
 
@@ -783,7 +779,7 @@ ALL_RULES = [
     check_objbckg_no_lambda,
     check_missing_utidelall,
     check_hardcoded_absolute_paths,
-    check_missing_fldunits,
+    check_removed_fldunits,
     check_docstring_hardcoded_mm,
     check_build_release_path,
     check_bessel_jv_for_sibc,

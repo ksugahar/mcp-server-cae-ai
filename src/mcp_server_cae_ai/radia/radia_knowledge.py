@@ -22,14 +22,15 @@ Python bindings (pybind11).
 ## Core Workflow
 
 ```
-1. rad.FldUnits('m')     # Set unit system
-2. rad.UtiDelAll()       # Clear previous objects
-3. Create geometry       # ObjHexahedron, ObjRecMag, etc.
-4. Apply materials       # MatLin, MatSatIsoFrm, etc.
-5. rad.Solve(...)        # Compute magnetization
-6. rad.Fld(...)          # Evaluate fields
-7. rad.UtiDelAll()       # Cleanup
+1. rad.UtiDelAll()       # Clear previous objects
+2. Create geometry       # ObjHexahedron, ObjRecMag, etc.
+3. Apply materials       # MatLin, MatSatIsoFrm, etc.
+4. rad.Solve(...)        # Compute magnetization
+5. rad.Fld(...)          # Evaluate fields
+6. rad.UtiDelAll()       # Cleanup
 ```
+
+Note: Radia always uses meters. All coordinates are in meters.
 
 ## Module Structure
 
@@ -62,7 +63,6 @@ RADIA_GEOMETRY = """
 import radia as rad
 import numpy as np
 
-rad.FldUnits('m')
 rad.UtiDelAll()
 
 # Rectangular permanent magnet: 20x20x10 mm, Br=1.2T in Z
@@ -216,7 +216,6 @@ result = rad.Solve(grp, 0.001, 100, 0)
 
 ```python
 rad.UtiDelAll()
-rad.FldUnits('m')
 
 # Create geometry
 verts = [[-0.01,-0.01,-0.01], [0.01,-0.01,-0.01],
@@ -492,7 +491,6 @@ import radia as rad
 from ngsolve import *
 from radia.netgen_mesh_import import netgen_mesh_to_radia
 
-rad.FldUnits('m')
 rad.UtiDelAll()
 
 # Create/load NGSolve mesh
@@ -536,16 +534,56 @@ container = cubit_hex_to_radia(
     magnetization=[0, 0, 0]
 )
 ```
+
+## NGSolve Magnetization -> Radia Open Boundary Field Evaluation
+
+NGSolve FEM solves M(x) inside bounded domains but cannot easily compute fields
+in unbounded external regions (needs PML). Radia provides natural open boundary
+field evaluation using exact analytical formulas (NOT dipole approximation).
+
+Pipeline:
+```
+NGSolve FEM Solve -> M per element -> netgen_mesh_to_radia() -> Radia objects -> rad.Fld()
+```
+
+IMPORTANT: Do NOT use dipole approximation (m=M*V). Register elements as proper
+Radia ObjHexahedron/ObjTetrahedron with solved magnetization. Radia's surface
+charge/surface current analytical formulas are exact for constant M per element.
+
+```python
+import radia as rad
+from ngsolve import *
+from radia.netgen_mesh_import import netgen_mesh_to_radia
+
+rad.UtiDelAll()
+
+# 1. NGSolve solves nonlinear problem -> M per element
+
+# 2. Convert mesh to Radia objects with per-element magnetization
+def material_from_ngsolve(el_idx):
+    M = get_element_magnetization(gf_M, mesh, el_idx)  # user function
+    return {'magnetization': M.tolist()}
+
+container = netgen_mesh_to_radia(mesh, material=material_from_ngsolve, units='m')
+# No Solve() needed - M is already known from NGSolve
+
+# 3. Evaluate field at arbitrary external points (exact analytical formulas)
+B = rad.Fld(container, 'b', [0, 0, 0.1])
+```
+
+Why Radia objects, not dipoles:
+- Surface charge model is exact for constant M (zero approximation error)
+- No distance limitation (dipoles fail at r < 2 * element_size)
+- netgen_mesh_to_radia() already supports per-element material via callable
 """
 
 RADIA_BEST_PRACTICES = """
 # Radia Best Practices
 
-## 1. Always Set Units First
+## 1. Units: Always Meters
 
-```python
-rad.FldUnits('m')   # BEFORE any geometry creation
-```
+Radia always uses meters. All coordinates must be specified in meters.
+`rad.FldUnits()` has been removed. Do not call it.
 
 ## 2. Always Clean Up
 
@@ -593,7 +631,7 @@ ext = rad.ObjBckg([0, 0, B_value])
   If ngsolve is imported first, thread pool configuration may conflict.
 - Radia and NGSolve share the same TaskManager (ngcore), so they coexist
   without thread conflicts.
-- Use `rad.FldUnits('m')` for SI consistency
+- Radia always uses meters (all coordinates in meters)
 - Use `netgen_mesh_to_radia()` for mesh conversion (not manual extraction)
 
 ## 9. Convergence Checks
@@ -1418,6 +1456,295 @@ gfA.vec.data = a.mat.Inverse(fes.FreeDofs(), inverse="pardiso") * f.vec
 Speedup vs UMFPACK: 3.9-7.7x (multi-threaded vs single-threaded).
 """
 
+RADIA_SCALAR_POTENTIAL = """
+# Phi-Reduced Scalar Potential (Radia + NGSolve)
+
+## Method: Simkin-Trowbridge (1979)
+
+The phi-reduced formulation splits the magnetic field:
+
+    H = H_s - grad(phi)
+
+where H_s is the source field (permanent magnets or coils) computed by Radia,
+and phi is the correction potential solved by NGSolve FEM to account for iron.
+
+This is ideal when:
+- The source field (magnets, coils) is easy to compute analytically (Radia)
+- Iron regions need FEM for their nonlinear/complex geometry response
+- Open boundary is needed (Radia handles it naturally)
+
+## ScalarPotentialSolver API
+
+```python
+from radia.scalar_potential_solver import ScalarPotentialSolver
+
+solver = ScalarPotentialSolver(mesh, iron_domains='iron', mu_r=1000, order=2)
+
+# Source from Radia object (voxel interpolation)
+solver.set_source_from_radia(radia_obj, resolution=31)
+
+# Or from callback
+solver.set_source_from_callback(lambda x,y,z: (Hx, Hy, Hz), resolution=31)
+
+# Or from CoefficientFunction directly
+solver.set_source_cf(H_source_cf)
+
+# Solve
+solver.solve(method='auto')  # 'single' if mu_r<5000, 'two' otherwise
+
+# Results
+B_cf = solver.get_B()        # CoefficientFunction (Tesla)
+H_cf = solver.get_H()        # CoefficientFunction (A/m)
+B_hdiv = solver.project_to_hdiv()  # HDiv GridFunction (div(B)=0)
+```
+
+## Coil Modeling via Equivalent Magnetization
+
+A solenoid with N turns, current I, height h produces the same external
+field as a uniformly magnetized body with M_z = N*I/h (A/m).
+
+For a hollow rectangular coil (bore = inner hole, outer = winding OD):
+```python
+M_z = N * I / h  # A/m
+a_in, a_out = bore/2, outer/2
+
+# 4 wall blocks forming the hollow rectangle
+left  = rad.ObjRecMag([-(a_in+a_out)/2, 0, 0], [a_out-a_in, outer, h], [0,0,M_z])
+right = rad.ObjRecMag([ (a_in+a_out)/2, 0, 0], [a_out-a_in, outer, h], [0,0,M_z])
+front = rad.ObjRecMag([0,  (a_in+a_out)/2, 0], [bore, a_out-a_in, h], [0,0,M_z])
+back  = rad.ObjRecMag([0, -(a_in+a_out)/2, 0], [bore, a_out-a_in, h], [0,0,M_z])
+coil = rad.ObjCnt([left, right, front, back])
+```
+
+## Solver Method Selection
+
+| mu_r Range | Method | Why |
+|------------|--------|-----|
+| < 5000 | `single` (reduced potential) | Simple, fast, adequate accuracy |
+| >= 5000 | `two` (Simkin-Trowbridge) | Avoids cancellation in high-mu iron |
+
+## Examples
+
+- `examples/ngsolve_integration/demo_scalar_potential.py` - PM source
+- `examples/ngsolve_integration/demo_coil_scalar_potential.py` - Coil source
+
+## Reference
+
+J. Simkin and C. W. Trowbridge, "On the use of the total scalar potential
+in the numerical solution of field problems in electromagnetics,"
+Int. J. Numer. Methods Eng., vol. 14, pp. 423-440, 1979.
+"""
+
+RADIA_PLAY_MODELS = """
+# Play Models: Typical MMM/MSC Usage Patterns
+
+Radia uses two integral methods depending on element type:
+
+| Method | Elements | DOF/elem | Description |
+|--------|----------|----------|-------------|
+| **MMM** | Tetrahedron (4 vtx) | 3 (Mx,My,Mz) | Volume magnetization |
+| **MSC** | Hexahedron (8 vtx) | 6 (sigma/face) | Surface charge on faces |
+| **MSC** | Wedge (6 vtx) | 5 (sigma/face) | Transition elements |
+| **MMM** | ObjRecMag (center+dims) | 3 | Optimized rectangular block |
+
+Mixed meshes (hex+tet+wedge) are fully supported by all solvers.
+
+---
+
+## Pattern A: Permanent Magnet Only (No Solve)
+
+Fixed magnetization -- no iterative solve needed.  Fastest pattern.
+
+```python
+import radia as rad
+rad.UtiDelAll()
+
+# Rectangular PM: 20x20x10 mm, Br=1.2T in Z
+# M = Br / mu_0 = 1.2 / (4*pi*1e-7) = 954930 A/m
+mag = rad.ObjRecMag([0, 0, 0], [0.02, 0.02, 0.01], [0, 0, 954930])
+
+# Or use ObjHexahedron with 8 vertices for arbitrary shapes
+s = 0.01  # half-size in meters
+verts = [[-s,-s,-s],[s,-s,-s],[s,s,-s],[-s,s,-s],
+         [-s,-s,s],[s,-s,s],[s,s,s],[-s,s,s]]
+mag2 = rad.ObjHexahedron(verts, [0, 0, 954930])
+
+B = rad.Fld(mag, 'b', [0, 0, 0.03])  # No Solve() needed!
+rad.UtiDelAll()
+```
+
+**Example**: `examples/simple_problems/cubic_polyhedron_magnet.py`
+
+---
+
+## Pattern B: PM + Soft Iron (Linear)
+
+Iron acquires induced M from PM stray field.  Requires Solve().
+
+```python
+import radia as rad
+import numpy as np
+rad.UtiDelAll()
+
+# Permanent magnet
+pm = rad.ObjRecMag([0, 0, 0], [0.02, 0.02, 0.01], [0, 0, 954930])
+
+# Iron pole piece (zero initial M)
+iron = rad.ObjRecMag([0, 0, 0.015], [0.03, 0.03, 0.01], [0, 0, 0])
+mat = rad.MatLin(1000)  # mu_r = 1000
+rad.MatApl(iron, mat)
+
+assembly = rad.ObjCnt([pm, iron])
+result = rad.Solve(assembly, 0.0001, 1000, 0)  # LU solver
+print(f"Converged: max|dM|={result[3]:.2e}")
+
+B = rad.Fld(assembly, 'b', [0, 0, 0.03])
+rad.UtiDelAll()
+```
+
+**Example**: `examples/c_type_electromagnet/mu=1000/full/verify_elf_radia.py`
+
+---
+
+## Pattern C: Iron in Background Field
+
+Soft iron in an externally applied field.  Classic magnetization problem.
+
+```python
+import radia as rad
+import numpy as np
+rad.UtiDelAll()
+
+MU_0 = 4 * np.pi * 1e-7
+
+# 3x3x3 hex mesh for a 20mm iron cube
+n = 3; dx = 0.02 / n; offset = 0.01
+objs = []
+base = [[0,0,0],[1,0,0],[1,1,0],[0,1,0],
+        [0,0,1],[1,0,1],[1,1,1],[0,1,1]]
+for iz in range(n):
+    for iy in range(n):
+        for ix in range(n):
+            x0, y0, z0 = ix*dx - offset, iy*dx - offset, iz*dx - offset
+            v = [[c[0]*dx+x0, c[1]*dx+y0, c[2]*dx+z0] for c in base]
+            objs.append(rad.ObjHexahedron(v, [0,0,0]))
+
+iron = rad.ObjCnt(objs)
+rad.MatApl(iron, rad.MatLin(1000))
+
+# IMPORTANT: ObjBckg requires a CALLABLE, not a list!
+bkg = rad.ObjBckg(lambda p: [0, 0, MU_0 * 200000])  # ~0.25 T
+grp = rad.ObjCnt([iron, bkg])
+
+result = rad.Solve(grp, 0.001, 100, 0)  # 27 hex, LU is fine
+B = rad.Fld(grp, 'b', [0, 0, 0.02])
+rad.UtiDelAll()
+```
+
+**Element count**: 27 hex = 27 * 6 = 162 DOF (MSC)
+**Example**: `examples/cube_uniform_field/test_objm_minimal.py`
+
+---
+
+## Pattern D: Nonlinear Iron (B-H Curve)
+
+Saturable iron with tabulated or functional B-H data.
+
+```python
+import radia as rad
+rad.UtiDelAll()
+
+# Tabulated B-H curve: [[H (A/m), B (T)], ...]
+BH = [[0,0], [100,0.1], [500,0.8], [1000,1.2],
+      [5000,1.6], [20000,1.9], [50000,2.0]]
+mat_nl = rad.MatSatIsoTab(BH)
+
+# Or functional form: MatSatIsoFrm
+# mat_nl = rad.MatSatIsoFrm([ksi1, ms1], [ksi2, ms2], [ksi3, ms3])
+
+iron = rad.ObjRecMag([0, 0, 0], [0.02, 0.02, 0.02], [0, 0, 0])
+rad.MatApl(iron, mat_nl)
+
+bkg = rad.ObjBckg(lambda p: [0, 0, 0.5])  # 0.5 T
+grp = rad.ObjCnt([iron, bkg])
+
+# Nonlinear: may need more iterations + under-relaxation
+rad.SetRelaxParam(0.3)  # 30% damping
+result = rad.Solve(grp, 0.0001, 500, 0)
+rad.SetRelaxParam(0.0)  # reset
+rad.UtiDelAll()
+```
+
+**Example**: `examples/background_fields/sphere_in_quadrupole.py`
+
+---
+
+## Pattern E: Mixed Element Types (Hex + Tet)
+
+Use netgen_mesh_to_radia() or gmsh_to_radia() for complex geometries.
+
+```python
+import radia as rad
+from radia.netgen_mesh_import import netgen_mesh_to_radia
+
+rad.UtiDelAll()
+
+# Import NGSolve mesh -> Radia (auto-creates hex/tet/wedge elements)
+container = netgen_mesh_to_radia(
+    mesh,
+    material={'magnetization': [0, 0, 0]},  # or callable per element
+    units='m'
+)
+
+# Apply material
+rad.MatApl(container, rad.MatLin(1000))
+
+bkg = rad.ObjBckg(lambda p: [0, 0, 0.1])
+grp = rad.ObjCnt([container, bkg])
+result = rad.Solve(grp, 0.001, 100, 1)  # BiCGSTAB for medium size
+rad.UtiDelAll()
+```
+
+**DOF**: Mixed -- each hex has 6 DOF (MSC), each tet has 3 DOF (MMM).
+**Example**: `examples/NGSolve_Integration/mesh_magnetization_import/`
+
+---
+
+## Pattern F: Large-Scale with HACApK
+
+For N > 2000 elements, use H-matrix acceleration (method=2).
+
+```python
+import radia as rad
+rad.UtiDelAll()
+
+# ... create large hex mesh (e.g., 10x10x10 = 1000 elements) ...
+
+rad.MatApl(iron, rad.MatLin(1000))
+bkg = rad.ObjBckg(lambda p: [0, 0, 0.1])
+grp = rad.ObjCnt([iron, bkg])
+
+# Configure HACApK parameters BEFORE Solve
+rad.SetHACApKParams(1e-4, 10, 2.0)  # eps, leaf_size, eta
+
+result = rad.Solve(grp, 0.001, 100, 2)  # method=2 = HACApK
+
+# Batch field evaluation (TaskManager parallelized)
+import numpy as np
+pts = np.array([[x, 0, 0] for x in np.linspace(-0.1, 0.1, 100)])
+result = rad.FldBatch(grp, pts)
+B = np.array(result['B'])
+rad.UtiDelAll()
+```
+
+**Solver selection summary**:
+- N < 500: method=0 (LU) -- direct, guaranteed
+- 500 < N < 2000: method=1 (BiCGSTAB) -- fastest general
+- N > 2000: method=2 (HACApK) -- O(N log N) memory
+
+**Example**: `examples/cube_uniform_field/hexahedron/benchmark_hex.py`
+"""
+
 
 def get_radia_documentation(topic: str = "all") -> str:
     """Return Radia usage documentation by topic."""
@@ -1434,6 +1761,8 @@ def get_radia_documentation(topic: str = "all") -> str:
         "ngbem_peec": RADIA_NGBEM_PEEC,
         "efie_preconditioner": RADIA_EFIE_PRECONDITIONER,
         "fem_verification": RADIA_FEM_VERIFICATION,
+        "scalar_potential": RADIA_SCALAR_POTENTIAL,
+        "play_models": RADIA_PLAY_MODELS,
     }
 
     topic = topic.lower().strip()
