@@ -502,6 +502,7 @@ def radia_usage(topic: str = "all") -> str:
             "fem_verification"    - NGSolve FEM verification results and parameters
             "scalar_potential"    - Phi-reduced scalar potential (Radia source + NGSolve FEM)
             "play_models"         - 6 canonical usage patterns (PM, PM+iron, bkg field, etc.)
+            "build_and_release"   - Build, CI/CD, wheel build, PyPI publish workflow
     """
     return get_radia_documentation(topic)
 
@@ -735,8 +736,8 @@ def radia_api_quick_reference() -> str:
         "- `rad.Solve(obj, precision, max_iter, method)` - method: 0=LU, 1=BiCGSTAB, 2=HACApK\n"
         "- `rad.SetHACApKParams(eps, leaf_size, eta)` - Default: (1e-4, 10, 2.0)\n\n"
         "## Fields\n"
-        "- `rad.Fld(obj, 'b'|'h'|'a'|'m', [x,y,z])` - Single point\n"
-        "- `rad.FldBatch(obj, points, nthreads)` - Batch evaluation\n"
+        "- `rad.Fld(obj, 'b'|'h'|'a'|'phi'|'m', [x,y,z])` - Single point (phi returns scalar)\n"
+        "- `rad.FldBatch(obj, points)` - Batch evaluation (B and H)\n"
         "- `rad.FldVTS(obj, filename, ...)` - VTK structured grid export\n\n"
         "## Cleanup\n"
         "- `rad.UtiDelAll()` - Delete all objects (MUST call at end)\n"

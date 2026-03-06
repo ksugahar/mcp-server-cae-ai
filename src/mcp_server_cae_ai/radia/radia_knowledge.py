@@ -372,8 +372,8 @@ print(stats['t_hmatrix_build'])     # H-matrix build time [s] (HACApK only)
 | Interaction matrix build | `rad_interaction.cpp` | `ParallelFor` |
 | Field computation (Fld, FldLst) | `rad_field_unified.cpp` | `ParallelFor` |
 | Analytical poly integrals | `rad_poly_analytical.cpp` | `ParallelFor` |
-| FMM field evaluation | `rad_exafmm.cpp` | `ParallelFor` |
-| ExaFMM tree traversal | `exafmm/fmm_scale_invariant.h` | `ParallelFor` |
+| Scalar potential batch | `rad_material_impl.cpp` | `ParallelFor` |
+| Vector potential batch | `rad_material_impl.cpp` | `ParallelFor` |
 
 ## NGSolve Compatibility
 
@@ -1746,6 +1746,176 @@ rad.UtiDelAll()
 """
 
 
+RADIA_BUILD_AND_RELEASE = """
+# Build, Release, and PyPI Publishing
+
+## Build Pipeline
+
+```
+Build.ps1 (MSVC + MKL + NGSolve)
+  |-> _radia_pybind.pyd (main C++ extension, required)
+  |-> peec_matrices.pyd  (PEEC matrix assembly, optional)
+  |-> cln_core.pyd       (Lanczos MOR, optional)
+  |-> mmm_core.pyd       (MMM solver, optional)
+  +-> All copied to src/radia/
+```
+
+### Prerequisites
+
+- **Visual Studio 2022** (MSVC compiler)
+- **Intel oneAPI Base Toolkit** (MKL only, NOT the Intel compiler)
+- **NGSolve** (source build at S:\\NGSolve\\01_GitHub\\install_ngsolve)
+- **Python 3.12** with pybind11
+
+### Build Commands
+
+```powershell
+# Standard build
+powershell -ExecutionPolicy Bypass -File Build.ps1
+
+# Clean rebuild
+powershell -ExecutionPolicy Bypass -File Build.ps1 -Rebuild
+
+# Build + run tests
+powershell -ExecutionPolicy Bypass -File Build.ps1 -Test
+
+# Verbose output
+powershell -ExecutionPolicy Bypass -File Build.ps1 -Verbose
+```
+
+### NGSolve for CI Runner
+
+The self-hosted CI runner (NETWORK SERVICE account) cannot access S: drive.
+NGSolve must be copied to C:\\NGSolve locally:
+
+```powershell
+# Run as Administrator when NGSolve is rebuilt:
+robocopy S:\\NGSolve\\01_GitHub\\install_ngsolve C:\\NGSolve /MIR
+```
+
+## CI/CD Pipeline (GitHub Actions)
+
+```
+git push (main or v* tag)
+  |
+  v
+CI (build-test.yml)
+  |-> Verify NGSolve at C:\\NGSolve
+  |-> Build.ps1 -Verbose (MSVC + MKL)
+  |-> Verify _radia_pybind.pyd exists
+  |-> pytest -m basic (quick tests)
+  |-> Build_Wheel.ps1 -DryRun (build wheel, verify, no upload)
+  |-> Upload artifacts: radia-pyd, radia-wheel, test-results
+  |
+  v
+Release (release.yml) -- triggered by CI success
+  |
+  +-> [main branch] upload-binaries
+  |     Upload .pyd to GitHub Releases (tag: binaries)
+  |
+  +-> [v* tag only] publish-pypi
+        Download wheel artifact
+        Publish to PyPI via OIDC Trusted Publishers
+        (pypa/gh-action-pypi-publish, no token needed)
+```
+
+### PyPI Publishing is AUTOMATIC
+
+When you push a version tag (e.g., `v2.5.0`), the pipeline:
+1. CI builds and tests
+2. If CI passes, Release workflow publishes wheel to PyPI
+3. Uses OIDC Trusted Publishers (no API token stored)
+
+## Release Checklist
+
+### 1. Prepare Release
+
+```python
+# 1. Bump version in TWO files (must match):
+#    - pyproject.toml: version = "X.Y.Z"
+#    - src/radia/__init__.py: __version__ = "X.Y.Z"
+
+# 2. Update CHANGELOG.md
+
+# 3. Build locally and verify
+powershell -ExecutionPolicy Bypass -File Build.ps1 -Rebuild -Test
+```
+
+### 2. Verify Wheel
+
+```python
+import zipfile
+whl = zipfile.ZipFile('dist/radia-X.Y.Z-cp312-cp312-win_amd64.whl')
+for info in whl.infolist():
+    if info.filename.endswith('.pyd'):
+        print(f'{info.filename}: {info.file_size} bytes')
+# Must contain radia/_radia_pybind.pyd (> 2 MB)
+# Must NOT contain any .dll files (MKL policy)
+```
+
+### 3. Tag and Push
+
+```bash
+git add pyproject.toml src/radia/__init__.py CHANGELOG.md
+git commit -m "Release vX.Y.Z: description"
+git tag vX.Y.Z
+git push origin main vX.Y.Z
+```
+
+### 4. Monitor
+
+```bash
+gh run list --limit 5        # Check CI status
+gh run watch <run-id>         # Watch build
+pip install radia==X.Y.Z     # Verify after publish
+```
+
+## Wheel Build Details (Build_Wheel.ps1)
+
+1. Clean dist/ and build/ directories
+2. `python -m build --wheel`
+3. **Remove any bundled DLLs** (MKL policy enforcement)
+4. Repack wheel with correct platform tag: `cp312-cp312-win_amd64`
+5. `twine check` for metadata validation
+
+**MKL DLL Policy**: Wheel MUST NOT bundle Intel MKL DLLs.
+Users install MKL via pip dependency: `mkl>=2024.2.0`.
+DLLs go to `{sys.prefix}/Library/bin/`, loaded by `__init__.py`.
+
+## Policy Lint (policy-lint.yml)
+
+Runs on every push. Checks:
+1. No `FldUnits()` calls (removed API)
+2. No binary files tracked in git
+3. No Helmholtz kernel in C++ core (Laplace-only)
+4. No `CblasColMajor` (row-major policy)
+5. No generated files at repo root
+6. No legacy import paths
+7. Every example directory has README.md
+
+## Package Structure
+
+```
+src/radia/
+  __init__.py           # DLL path setup + re-export
+  _radia_pybind.pyd     # Main C++ extension (required)
+  peec_matrices.pyd     # PEEC matrix assembly (optional)
+  cln_core.pyd          # CLN transient solver (optional)
+  mmm_core.pyd          # MMM solver (optional)
+  *.py                  # Python utility modules
+  # NO .dll files (MKL loaded from pip install location)
+```
+
+## Troubleshooting
+
+- **CI fails "NGSolve not found"**: Run `robocopy` to sync C:\\NGSolve
+- **Wheel too large**: Check for accidentally bundled .dll files
+- **Import fails on user machine**: Ensure `pip install mkl` was installed
+- **PyPI publish fails**: Check OIDC Trusted Publishers config on PyPI
+- **Binary upload fails**: Ensure `binaries` release exists on GitHub
+"""
+
+
 def get_radia_documentation(topic: str = "all") -> str:
     """Return Radia usage documentation by topic."""
     topics = {
@@ -1763,6 +1933,7 @@ def get_radia_documentation(topic: str = "all") -> str:
         "fem_verification": RADIA_FEM_VERIFICATION,
         "scalar_potential": RADIA_SCALAR_POTENTIAL,
         "play_models": RADIA_PLAY_MODELS,
+        "build_and_release": RADIA_BUILD_AND_RELEASE,
     }
 
     topic = topic.lower().strip()
