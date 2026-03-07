@@ -1007,6 +1007,128 @@ a += nu * curl(u) * curl(v) * dx
 NGSolve CoefficientFunctions require symbolic math (sqrt, **, atan, exp, etc.)
 or BSpline for automatic differentiation in Newton's method.
 
+### Method 3: SymbolicEnergy + BSpline.Integrate() (RECOMMENDED)
+
+The most robust approach for measured B-H data. Uses the magnetic co-energy
+density w*(B) = integral H(B') dB' as the variational energy functional.
+NGSolve automatically differentiates the energy for Newton's Jacobian.
+
+**Key idea**: Instead of assembling `nu(|B|)*curl(u)*curl(v)` (Method 1/2),
+define the ENERGY density and let NGSolve compute both residual and Jacobian.
+
+```python
+import pandas as pd
+from ngsolve import BSpline
+
+mu0 = 4e-7 * 3.14159265
+
+# Load B-H data (column 0 = H in A/m, column 1 = B in Tesla)
+df = pd.read_csv('BH.txt', sep='\\t')
+H_data = list(df.iloc[:, 0])
+B_data = list(df.iloc[:, 1])
+
+# BSpline: H as function of B (= reluctivity * B)
+bh_curve = BSpline(2, [0] + B_data, H_data)
+
+# Co-energy density: w*(B) = integral_0^B H(B') dB'
+energy_dens = bh_curve.Integrate()
+
+# HCurl FE space
+fes = HCurl(mesh, order=2, nograds=True, dirichlet="symmetry|outer")
+u, v = fes.TnT()
+sol = GridFunction(fes, "A")
+sol.vec[:] = 0
+
+# Bilinear form (symmetric for energy-based Newton)
+a = BilinearForm(fes, symmetric=True)
+# Linear regions (air, coil): standard curl-curl with constant nu
+a += SymbolicBFI(1/mu0 * curl(u) * curl(v),
+                 definedon=~mesh.Materials("iron"))
+# Nonlinear iron: SymbolicEnergy from co-energy density
+a += SymbolicEnergy(
+    energy_dens(sqrt(1e-12 + curl(u) * curl(u))),
+    definedon=mesh.Materials("iron"))
+# Coulomb gauging (stabilization)
+a += SymbolicBFI(1e-1 * u * v)
+
+c = Preconditioner(a, type="bddc", inverse="sparsecholesky")
+
+# Source: current density in coil
+f = LinearForm(-J0 * J_normalized * v * dx("coil"))
+```
+
+**BSpline vs BSplineCurve1D**: `BSpline` (from ngsolve) has `.Integrate()` for
+exact antiderivative. `BSplineCurve1D` (from netgen.occ) is for geometry only.
+
+**SymbolicEnergy vs SymbolicBFI**: SymbolicEnergy defines a scalar energy density;
+NGSolve derives the weak form (1st derivative) and Jacobian (2nd derivative)
+automatically via symbolic differentiation. This is more robust than manually
+writing `nu(|B|)*curl(u)*curl(v)` because the Jacobian is exact.
+
+## Newton with Energy-Based Line Search (RECOMMENDED)
+
+For nonlinear problems, Newton with energy-based line search guarantees
+monotone energy decrease at every iteration. This is much more robust than
+fixed damping (`dampfactor`).
+
+**Reference**: `2024_09_21_C_type_gmsh_nonlinear.py`
+
+```python
+au = sol.vec.CreateVector()
+r = sol.vec.CreateVector()
+w = sol.vec.CreateVector()
+sol_new = sol.vec.CreateVector()
+
+with TaskManager():
+    f.Assemble()
+    err = 1
+    it = 0
+
+    while err > 1e-4:
+        it += 1
+
+        # Current total energy: E = W(A) - <f, A>
+        E0 = a.Energy(sol.vec) - InnerProduct(f.vec, sol.vec)
+
+        # Jacobian and residual
+        a.AssembleLinearization(sol.vec)
+        a.Apply(sol.vec, au)
+        r.data = f.vec - au
+
+        # Newton step (CG + BDDC preconditioner)
+        inv = CGSolver(mat=a.mat, pre=c.mat)
+        w.data = inv * r
+
+        # Convergence check (energy norm of residual)
+        err = InnerProduct(w, r)
+        print(f"Newton iter {it}: err = {err:.2e}")
+
+        # Energy-based line search (halving)
+        sol_new.data = sol.vec + w
+        E = a.Energy(sol_new) - InnerProduct(f.vec, sol_new)
+        tau = 1
+        while E > E0:
+            tau = 0.5 * tau
+            sol_new.data = sol.vec + tau * w
+            E = a.Energy(sol_new) - InnerProduct(f.vec, sol_new)
+            print(f"  tau = {tau}, E = {E:.6e}")
+
+        sol.vec.data = sol_new
+```
+
+**Why energy line search is superior to fixed damping:**
+
+| Feature | Fixed damping | Energy line search |
+|---------|--------------|-------------------|
+| Convergence | Sensitive to dampfactor | Guaranteed monotone decrease |
+| Tuning | Manual (0.5-1.0) | Automatic |
+| Deep saturation | May diverge | Robust |
+| Near convergence | Quadratic (full step) | Quadratic (tau=1 accepted) |
+
+**Convergence criterion**: `InnerProduct(w, r)` is the energy norm of the
+residual. This is the natural measure for energy-based problems. Typical
+threshold: 1e-4 for engineering, 1e-8 for high accuracy.
+
 ## Newton with BDDC Preconditioner (Large-Scale)
 
 For large nonlinear problems (>100K DOFs), use BDDC + CG per Newton step:

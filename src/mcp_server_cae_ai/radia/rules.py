@@ -108,6 +108,58 @@ def check_removed_fldunits(filepath: str, lines: List[str]) -> List[Dict]:
     return findings
 
 
+def check_removed_fldbatch(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: FldBatch/FldA/FldPhi removed. Use unified Fld() with batch points."""
+    findings = []
+    pattern = re.compile(r'(?:rad\.)?(?:FldBatch|FldA|FldPhi)\s*\(')
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if pattern.search(stripped):
+            findings.append({
+                'line': i,
+                'severity': 'HIGH',
+                'rule': 'removed-fldbatch',
+                'message': (
+                    'FldBatch/FldA/FldPhi are removed. '
+                    'Use rad.Fld(obj, field_type, points) with shape (N,3) for batch.'
+                ),
+            })
+    return findings
+
+
+def check_removed_solver_apis(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: Old solver parameter APIs removed. Use SolverConfig()."""
+    findings = []
+    old_apis = [
+        'SetHACApKParams', 'SetHMatrixEpsilon',
+        'SetBiCGSTABTol', 'GetBiCGSTABTol',
+        'SetRelaxParam', 'GetRelaxParam',
+        'SetNewtonMethod', 'GetNewtonMethod',
+        'SetNewtonDamping', 'GetNewtonDampingStats',
+        'SetHMatrixFieldEval',
+    ]
+    pattern = re.compile(
+        r'(?:rad\.)?(?:' + '|'.join(old_apis) + r')\s*\('
+    )
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if pattern.search(stripped):
+            findings.append({
+                'line': i,
+                'severity': 'HIGH',
+                'rule': 'removed-solver-api',
+                'message': (
+                    'Old solver parameter API removed. '
+                    'Use rad.SolverConfig(**kwargs) and rad.GetSolverConfig() instead.'
+                ),
+            })
+    return findings
+
+
 def check_docstring_hardcoded_mm(filepath: str, lines: List[str]) -> List[Dict]:
     """MODERATE: Public API docstrings should not hardcode 'in mm'."""
     findings = []
@@ -773,6 +825,133 @@ def check_ngsolve_kelvin_missing_bonus_intorder(filepath: str, lines: List[str])
     return findings
 
 
+# ── GmshBuilder rules ──────────────────────────────────────────────
+
+
+def check_gmsh_builder_no_context_manager(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: GmshBuilder must be used as a context manager."""
+    findings = []
+    has_gmsh_builder = any('GmshBuilder' in line for line in lines)
+    if not has_gmsh_builder:
+        return findings
+
+    has_with = any(re.search(r'with\s+GmshBuilder', line) for line in lines)
+    has_assignment = any(re.search(r'=\s*GmshBuilder\s*\(', line) for line in lines)
+
+    if has_assignment and not has_with:
+        for i, line in enumerate(lines, 1):
+            if re.search(r'=\s*GmshBuilder\s*\(', line) and not re.search(r'with\s+', line):
+                findings.append({
+                    'line': i,
+                    'severity': 'HIGH',
+                    'rule': 'gmsh-builder-no-context-manager',
+                    'message': (
+                        'GmshBuilder must be used as a context manager (with statement). '
+                        'Use: with GmshBuilder() as gb: ...'
+                    ),
+                })
+    return findings
+
+
+def check_gmsh_builder_old_cubit_import(filepath: str, lines: List[str]) -> List[Dict]:
+    """HIGH: CubitMesh / cubit_mesh renamed to GmshBuilder / gmsh_builder."""
+    findings = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if re.search(r'from\s+.*cubit_mesh\s+import|import\s+.*cubit_mesh', stripped):
+            findings.append({
+                'line': i,
+                'severity': 'HIGH',
+                'rule': 'gmsh-builder-old-cubit-import',
+                'message': (
+                    'cubit_mesh has been renamed to gmsh_builder. '
+                    'Use: from radia.gmsh_builder import GmshBuilder'
+                ),
+            })
+        if re.search(r'\bCubitMesh\b', stripped) and 'import' not in stripped:
+            findings.append({
+                'line': i,
+                'severity': 'HIGH',
+                'rule': 'gmsh-builder-old-cubit-import',
+                'message': (
+                    'CubitMesh has been renamed to GmshBuilder. '
+                    'Use: from radia.gmsh_builder import GmshBuilder'
+                ),
+            })
+    return findings
+
+
+def check_gmsh_builder_generate_before_mesh_size(filepath: str, lines: List[str]) -> List[Dict]:
+    """MODERATE: set_mesh_size or set_divisions should be called before generate."""
+    findings = []
+    has_gmsh_builder = any('GmshBuilder' in line for line in lines)
+    if not has_gmsh_builder:
+        return findings
+
+    generate_line = None
+    has_size_or_div = False
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if re.search(r'\.set_mesh_size\s*\(|\.set_divisions\s*\(|\.set_divisions_all\s*\(', stripped):
+            has_size_or_div = True
+        if re.search(r'\.generate\s*\(', stripped) and generate_line is None:
+            generate_line = i
+
+    if generate_line is not None and not has_size_or_div:
+        findings.append({
+            'line': generate_line,
+            'severity': 'MODERATE',
+            'rule': 'gmsh-builder-no-mesh-size',
+            'message': (
+                'generate() called without set_mesh_size() or set_divisions(). '
+                'Set mesh size before generating: gb.set_mesh_size(0.005)'
+            ),
+        })
+    return findings
+
+
+def check_gmsh_builder_missing_fragment(filepath: str, lines: List[str]) -> List[Dict]:
+    """MODERATE: Multi-body assembly should use fragment() for shared interfaces."""
+    findings = []
+    has_gmsh_builder = any('GmshBuilder' in line for line in lines)
+    if not has_gmsh_builder:
+        return findings
+
+    # Count add_box / add_cylinder calls
+    geometry_calls = 0
+    has_fragment = False
+    has_to_radia = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        if re.search(r'\.add_box\s*\(|\.add_cylinder\s*\(|\.add_sphere\s*\(', stripped):
+            geometry_calls += 1
+        if re.search(r'\.fragment\s*\(|\.fragment_tracked\s*\(', stripped):
+            has_fragment = True
+        if re.search(r'\.to_radia\s*\(', stripped):
+            has_to_radia = True
+
+    if geometry_calls >= 3 and has_to_radia and not has_fragment:
+        findings.append({
+            'line': 1,
+            'severity': 'MODERATE',
+            'rule': 'gmsh-builder-missing-fragment',
+            'message': (
+                'Multiple geometries exported to Radia without fragment(). '
+                'Use gb.fragment(vol_ids) to create shared interfaces '
+                'between adjacent volumes before meshing.'
+            ),
+        })
+    return findings
+
+
 # All rules in execution order
 ALL_RULES = [
     # Radia rules
@@ -780,6 +959,8 @@ ALL_RULES = [
     check_missing_utidelall,
     check_hardcoded_absolute_paths,
     check_removed_fldunits,
+    check_removed_fldbatch,
+    check_removed_solver_apis,
     check_docstring_hardcoded_mm,
     check_build_release_path,
     check_bessel_jv_for_sibc,
@@ -803,4 +984,9 @@ ALL_RULES = [
     # NGSolve rules (induction heating)
     check_eddy_current_missing_complex,
     check_joule_heat_missing_conj,
+    # GmshBuilder rules
+    check_gmsh_builder_no_context_manager,
+    check_gmsh_builder_old_cubit_import,
+    check_gmsh_builder_generate_before_mesh_size,
+    check_gmsh_builder_missing_fragment,
 ]

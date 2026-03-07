@@ -11,6 +11,8 @@ from mcp_server_cae_ai.radia.rules import (
     check_missing_utidelall,
     check_hardcoded_absolute_paths,
     check_removed_fldunits,
+    check_removed_fldbatch,
+    check_removed_solver_apis,
     check_docstring_hardcoded_mm,
     check_build_release_path,
     check_bessel_jv_for_sibc,
@@ -139,6 +141,63 @@ class TestRemovedFldUnits:
     def test_skips_comments(self):
         code = '# rad.FldUnits() is removed'
         assert _run(check_removed_fldunits, code) == []
+
+
+class TestRemovedFldBatch:
+    def test_detects_fldbatch(self):
+        code = 'result = rad.FldBatch(mag, pts)'
+        findings = _run(check_removed_fldbatch, code)
+        assert len(findings) == 1
+        assert findings[0]['rule'] == 'removed-fldbatch'
+
+    def test_detects_flda(self):
+        code = 'A = rad.FldA(mag, pts)'
+        findings = _run(check_removed_fldbatch, code)
+        assert len(findings) == 1
+
+    def test_detects_fldphi(self):
+        code = 'phi = rad.FldPhi(mag, pts)'
+        findings = _run(check_removed_fldbatch, code)
+        assert len(findings) == 1
+
+    def test_allows_unified_fld(self):
+        code = 'B = rad.Fld(mag, "b", pts)'
+        assert _run(check_removed_fldbatch, code) == []
+
+    def test_skips_comments(self):
+        code = '# FldBatch is removed'
+        assert _run(check_removed_fldbatch, code) == []
+
+
+class TestRemovedSolverApis:
+    def test_detects_sethacapkparams(self):
+        code = 'rad.SetHACApKParams(1e-4, 10, 2.0)'
+        findings = _run(check_removed_solver_apis, code)
+        assert len(findings) == 1
+        assert findings[0]['rule'] == 'removed-solver-api'
+
+    def test_detects_setbicgstabtol(self):
+        code = 'rad.SetBiCGSTABTol(1e-6)'
+        findings = _run(check_removed_solver_apis, code)
+        assert len(findings) == 1
+
+    def test_detects_setrelaxparam(self):
+        code = 'rad.SetRelaxParam(0.3)'
+        findings = _run(check_removed_solver_apis, code)
+        assert len(findings) == 1
+
+    def test_detects_setnewtonmethod(self):
+        code = 'rad.SetNewtonMethod(True)'
+        findings = _run(check_removed_solver_apis, code)
+        assert len(findings) == 1
+
+    def test_allows_solverconfig(self):
+        code = 'rad.SolverConfig(hacapk_eps=1e-4)'
+        assert _run(check_removed_solver_apis, code) == []
+
+    def test_skips_comments(self):
+        code = '# rad.SetHACApKParams is replaced by SolverConfig'
+        assert _run(check_removed_solver_apis, code) == []
 
 
 class TestDocstringHardcodedMm:
@@ -513,7 +572,7 @@ class TestKelvinMissingBonusIntorder:
 
 class TestAllRulesList:
     def test_all_rules_count(self):
-        assert len(ALL_RULES) == 23
+        assert len(ALL_RULES) == 29
 
     def test_all_rules_callable(self):
         for rule in ALL_RULES:

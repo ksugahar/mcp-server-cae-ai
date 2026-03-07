@@ -14,6 +14,7 @@ Provides AI coding assistants (Claude Code, Cursor, etc.) with domain knowledge 
 - **NGSolve / ngbem** -- FEM spaces, Maxwell formulations, Kelvin transform, BEM operators
 - **Coreform Cubit** -- Hex meshing, export workflows, Python scripting API
 - **Cubit-to-Netgen** -- High-order curving, SetGeomInfo, name-based workflows
+- **GMSH** -- Open-source meshing, OCC geometry, transfinite hex, Radia/NGSolve integration
 
 ## Installation
 
@@ -30,6 +31,7 @@ Requires Python 3.10+. The only dependency is `mcp>=1.0.0`.
 ```bash
 claude mcp add radia -- mcp-server-radia
 claude mcp add cubit -- mcp-server-cubit
+claude mcp add gmsh -- mcp-server-gmsh
 ```
 
 ### Project-level configuration (.mcp.json)
@@ -44,6 +46,9 @@ Add to your project root:
     },
     "cubit": {
       "command": "mcp-server-cubit"
+    },
+    "gmsh": {
+      "command": "mcp-server-gmsh"
     }
   }
 }
@@ -89,6 +94,21 @@ Domain knowledge for [Coreform Cubit](https://coreform.com/products/coreform-cub
 | `get_lint_rules` | List all 16 Cubit lint rules |
 | `troubleshooting_guide` | Debugging guidance |
 
+### mcp-server-gmsh (8 tools, 14 lint rules)
+
+Domain knowledge for [GMSH](https://gmsh.info/) open-source mesh generation.
+
+| Tool | Description |
+|------|-------------|
+| `gmsh_docs` | GMSH API docs (35 topics: api, scripting, workflows) |
+| `gmsh_code_example` | Ready-to-run GMSH examples (8 shapes/workflows) |
+| `gmsh_script_template` | Customizable script templates (5 workflows) |
+| `lint_gmsh_script` | Lint a GMSH Python script (14 rules) |
+| `lint_gmsh_directory` | Lint all scripts in a directory |
+| `get_gmsh_lint_rules` | List all 14 GMSH lint rules |
+| `gmsh_element_types` | GMSH element type code reference |
+| `gmsh_vs_cubit` | GMSH vs Cubit comparison guide |
+
 ## Knowledge Coverage
 
 ### Radia BEM/PEEC
@@ -126,6 +146,15 @@ Domain knowledge for [Coreform Cubit](https://coreform.com/products/coreform-cub
 - Mesh quality metrics and improvement
 - 600+ Python API functions documented
 
+### GMSH Meshing
+- OCC kernel: primitives, booleans, STEP/IGES import
+- Built-in kernel: bottom-up geometry (points, curves, surfaces)
+- Mesh size fields (Distance, Threshold, Min, MathEval)
+- Transfinite structured hex meshing
+- Physical groups for material/boundary assignment
+- Radia integration: gmsh_to_radia(), gmsh_surface_to_ngsolve()
+- NGSolve integration: ReadGmsh, high-order curving
+
 ### Cubit-to-Netgen High-Order Curving
 - SetGeomInfo API with UV parameter formulas
 - Name-based OCC workflows (noheal import)
@@ -133,13 +162,45 @@ Domain knowledge for [Coreform Cubit](https://coreform.com/products/coreform-cub
 - Cylinder, sphere, torus, cone curving
 - Tolerance tuning
 
-## Self-Test
+## Testing
 
 ```bash
-# Run from a project directory that has examples/
-mcp-server-radia --selftest
-mcp-server-cubit --selftest
+# Install with test dependencies
+pip install -e ".[test]"
+
+# Run all tests
+pytest
+
+# Run specific test suites
+pytest tests/test_radia_rules.py -v    # 23 Radia rule tests
+pytest tests/test_cubit_rules.py -v    # 16 Cubit rule tests
+pytest tests/test_gmsh_rules.py -v     # 14 GMSH rule tests
+pytest tests/test_selftest.py -v       # Selftest + fixture validation
 ```
+
+### Self-Test
+
+```bash
+# From a project with examples/ directory
+mcp-server-radia --selftest
+
+# From anywhere (falls back to built-in test fixtures)
+python -m mcp_server_cae_ai.radia.server --selftest
+```
+
+The `--selftest` flag lints the project's `examples/` directory when available.
+When `examples/` is not found, it automatically uses built-in test fixtures
+(`tests/fixtures/`) to validate all lint rules -- no external files needed.
+
+See [docs/TESTING.md](docs/TESTING.md) for details.
+
+## Development
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for:
+- Adding new lint rules
+- Adding knowledge topics
+- Severity guidelines
+- Architecture notes
 
 ## Release
 

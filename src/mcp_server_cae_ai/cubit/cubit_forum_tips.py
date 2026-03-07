@@ -718,25 +718,49 @@ cubit.cmd("mesh volume 1")
 
 ## Fix: "Reversal Nodes Found" Error
 
-When boundary layer fails with reversal nodes on complex surfaces
-with merged interfaces:
+When boundary layer fails with "Reversal Nodes Found" and
+"Boundary layer on surface is invalid", two root causes exist:
 
-**Solution**: Use `composite surface` before applying boundary layer:
+1. **Merged surfaces between volumes** create interface complications
+2. **Multiple individual surfaces** in boundary layer definition
+
+**Solution**: Delete merged volume early + use composite surface:
 
 ```python
-# Merge small faces into composite surface
-cubit.cmd("composite create surface 3 4 5 6 7 8")
+# Step 1: Create geometry with Boolean merge
+cubit.cmd("create brick 10 5 5")
+cubit.cmd("create brick 10 5 5")
+cubit.cmd("move vol 2 x 10")
+cubit.cmd("merge vol all")
 
-# Then apply boundary layer to the composite
+# Step 2: Delete the merged volume IMMEDIATELY (key step!)
+cubit.cmd("delete vol 2")
+
+# Step 3: Create composite from multiple BL surfaces
+# Instead of referencing surfaces individually (causes reversal nodes),
+# consolidate them into a single composite surface
+cubit.cmd("composite create surface 4 5 10 11 12 15 16 17")
+
+# Step 4: Set up boundary layer on the composite surface
 cubit.cmd("create boundary_layer 1")
 cubit.cmd("boundary_layer 1 first_row_height 0.001")
 cubit.cmd("boundary_layer 1 growth_factor 1.2")
 cubit.cmd("boundary_layer 1 num_rows 10")
-cubit.cmd("boundary_layer 1 add surface 3 volume 1")  # composite surface
+# Reference ONLY the composite surface (e.g., surface 24)
+cubit.cmd("modify boundary_layer 1 add surface 24 volume 1")
 
-# Delete shared surface volume, mesh, reflect, merge
+# Step 5: Mesh, then reflect and merge afterward
+cubit.cmd("volume 1 scheme tetmesh")
 cubit.cmd("mesh volume 1")
+cubit.cmd("volume 1 copy reflect z")
+cubit.cmd("merge vol all")
 ```
+
+**Key insights**:
+- `composite create surface` groups multiple surfaces into one entity,
+  preventing BL conflicts at surface intersections
+- Delete merged volumes BEFORE meshing, not after
+- Reflect and merge AFTER meshing (not before)
 
 Source: forum.coreform.com/t/2579 (Reversal Nodes Found)
 
