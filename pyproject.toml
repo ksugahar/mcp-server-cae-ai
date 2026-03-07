@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-server-cae-ai"
-version = "1.3.0"
+version = "1.4.0"
 description = "MCP servers for CAE: Radia magnetostatics + NGSolve FEM + Cubit/GMSH meshing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,7 @@ dependencies = [
 
 [project.scripts]
 mcp-server-radia = "mcp_server_cae_ai.radia.server:main"
+mcp-server-ngsolve = "mcp_server_cae_ai.ngsolve.server:main"
 mcp-server-cubit = "mcp_server_cae_ai.cubit.server:main"
 mcp-server-gmsh = "mcp_server_cae_ai.gmsh.server:main"
 

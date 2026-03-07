@@ -30,6 +30,7 @@ Requires Python 3.10+. The only dependency is `mcp>=1.0.0`.
 
 ```bash
 claude mcp add radia -- mcp-server-radia
+claude mcp add ngsolve -- mcp-server-ngsolve
 claude mcp add cubit -- mcp-server-cubit
 claude mcp add gmsh -- mcp-server-gmsh
 ```
@@ -43,6 +44,9 @@ Add to your project root:
   "mcpServers": {
     "radia": {
       "command": "mcp-server-radia"
+    },
+    "ngsolve": {
+      "command": "mcp-server-ngsolve"
     },
     "cubit": {
       "command": "mcp-server-cubit"
@@ -60,20 +64,31 @@ Inside Claude Code, run `/mcp` to confirm the servers are listed.
 
 ## Servers
 
-### mcp-server-radia (8 tools, 21 lint rules)
+### mcp-server-radia (5 tools, 17 lint rules)
 
-Domain knowledge for [Radia](https://github.com/ksugahar/Radia) magnetostatics, NGSolve FEM, and ngbem BEM.
+Domain knowledge for [Radia](https://github.com/ksugahar/Radia) magnetostatics, PEEC, and GmshBuilder.
 
 | Tool | Description |
 |------|-------------|
-| `lint_radia_script` | Lint a Python script for Radia/NGSolve violations |
+| `lint_radia_script` | Lint a Python script for Radia/PEEC violations |
 | `lint_radia_directory` | Lint all scripts in a directory |
-| `get_radia_lint_rules` | List all 21 lint rules with descriptions |
+| `get_radia_lint_rules` | List all 17 lint rules with descriptions |
 | `radia_usage` | Radia API docs (geometry, materials, PEEC, ngbem) |
+| `gmsh_builder_usage` | GmshBuilder 719-method mesh generation library |
+
+### mcp-server-ngsolve (7 tools, 17 lint rules)
+
+Domain knowledge for [NGSolve](https://ngsolve.org/) FEM, ngbem BEM, and electromagnetic formulations.
+
+| Tool | Description |
+|------|-------------|
+| `lint_ngsolve_script` | Lint a Python script for NGSolve violations |
+| `lint_ngsolve_directory` | Lint all scripts in a directory |
+| `get_ngsolve_lint_rules` | List all 17 lint rules with descriptions |
 | `ngsolve_usage` | NGSolve FEM guide (12 topics, 35 pitfalls) |
+| `sparsesolv` | ngsolve-sparsesolv ICCG solver docs |
 | `kelvin_transformation` | Kelvin transform for open boundary FEM |
-| `sparsesolv_usage` | ngsolve-sparsesolv ICCG solver docs |
-| `sparsesolv_code_example` | Ready-to-run solver examples |
+| `induction_heating` | Induction heating workflow (EM + thermal) |
 
 ### mcp-server-cubit (12 tools, 16 lint rules)
 
@@ -172,7 +187,8 @@ pip install -e ".[test]"
 pytest
 
 # Run specific test suites
-pytest tests/test_radia_rules.py -v    # 23 Radia rule tests
+pytest tests/test_radia_rules.py -v    # 17 Radia rule tests
+pytest tests/test_ngsolve_rules.py -v  # 17 NGSolve rule tests
 pytest tests/test_cubit_rules.py -v    # 16 Cubit rule tests
 pytest tests/test_gmsh_rules.py -v     # 14 GMSH rule tests
 pytest tests/test_selftest.py -v       # Selftest + fixture validation
@@ -183,9 +199,11 @@ pytest tests/test_selftest.py -v       # Selftest + fixture validation
 ```bash
 # From a project with examples/ directory
 mcp-server-radia --selftest
+mcp-server-ngsolve --selftest
 
 # From anywhere (falls back to built-in test fixtures)
 python -m mcp_server_cae_ai.radia.server --selftest
+python -m mcp_server_cae_ai.ngsolve.server --selftest
 ```
 
 The `--selftest` flag lints the project's `examples/` directory when available.

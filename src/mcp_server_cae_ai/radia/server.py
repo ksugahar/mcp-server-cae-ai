@@ -2,14 +2,12 @@
 Radia Project MCP Server
 
 Provides tools for:
-- Linting Python scripts against Radia + NGSolve conventions (27 rules)
+- Linting Python scripts against Radia conventions (17 rules)
 - Radia BEM library usage documentation
 - GmshBuilder mesh generation API documentation (719 methods, 15 topics incl. CFD techniques)
-- NGSolve FEM usage documentation (12 topics incl. EM formulations, adaptive)
-- Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
-- Kelvin transformation reference for open boundary FEM
-- ngsolve-sparsesolv (ICCG) solver documentation
 - md2html converter documentation (MathJax, reference links, styled HTML)
+
+NGSolve FEM documentation is in the separate mcp-server-ngsolve.
 
 Usage:
     mcp-server-radia              # Start MCP server (stdio transport)
@@ -25,11 +23,7 @@ from mcp.server.fastmcp import FastMCP
 
 # Import rules and knowledge bases
 from .rules import ALL_RULES
-from .sparsesolv_knowledge import get_sparsesolv_documentation
-from .kelvin_knowledge import get_kelvin_documentation
 from .radia_knowledge import get_radia_documentation
-from .ngsolve_knowledge import get_ngsolve_documentation
-from .induction_heating_knowledge import get_induction_heating_documentation
 from .md2html_knowledge import get_md2html_documentation
 from .gmsh_builder_knowledge import get_gmsh_builder_documentation
 
@@ -75,34 +69,26 @@ def _format_findings(filepath: str, findings: list[dict]) -> str:
 @mcp.tool()
 def lint_radia_script(filepath: str) -> str:
     """
-    Lint a single Python script for Radia and NGSolve convention violations.
+    Lint a single Python script for Radia convention violations.
 
-    Radia checks:
+    Checks:
     - ObjBckg called with list instead of callable (CRITICAL)
     - Bessel jv used instead of iv for circular SIBC (CRITICAL)
     - Missing rad.UtiDelAll() cleanup (HIGH)
     - Hardcoded absolute paths in sys.path (HIGH)
     - EFIE V_LL term with wrong (minus) sign (HIGH)
     - Removed rad.FldUnits() call present (HIGH)
+    - Removed FldBatch/FldA/FldPhi (HIGH)
+    - Removed old solver APIs (HIGH)
+    - GmshBuilder not used as context manager (HIGH)
+    - GmshBuilder old cubit_mesh import (HIGH)
     - PEEC n_seg too low for circular coil coupling (MODERATE)
     - Classical EFIE 1/kappa^2 low-frequency breakdown (MODERATE)
     - PEEC P/(jw) low-frequency breakdown (HIGH)
     - Docstrings hardcoding "in mm" (MODERATE)
+    - GmshBuilder generate without mesh size (MODERATE)
+    - GmshBuilder missing fragment (MODERATE)
     - Outdated build/Release path imports (LOW)
-
-    NGSolve checks:
-    - BEM on HDivSurface without .Trace() (CRITICAL)
-    - HCurl magnetostatics without nograds=True (HIGH)
-    - Eddy current FE space missing complex=True (HIGH)
-    - BDDC preconditioner registered after assembly (MODERATE)
-    - Overwriting x/y/z coordinate variables (MODERATE)
-    - Direct .vec assignment without .data (MODERATE)
-    - 2D OCC geometry without dim=2 (MODERATE)
-    - CG on A-Omega saddle-point system (MODERATE)
-    - Kelvin domain without bonus_intorder (MODERATE)
-    - VectorH1 for electromagnetic fields (MODERATE)
-    - PINVIT/LOBPCG without gradient projection (MODERATE)
-    - Joule heat missing Conj() for complex fields (MODERATE)
 
     Args:
         filepath: Absolute or relative path to the Python file to check.
@@ -322,123 +308,6 @@ def get_radia_lint_rules() -> str:
             ),
             'fix': 'Use stabilized EFIE: [A_k, Q_k; Q_k^T, kappa^2*V_k].',
         },
-        # NGSolve rules
-        {
-            'rule': 'hcurl-missing-nograds',
-            'severity': 'HIGH',
-            'description': (
-                'HCurl space for magnetostatics should use nograds=True to '
-                'remove gradient null space. Without it, the curl-curl system '
-                'is singular.'
-            ),
-            'fix': 'Add nograds=True: HCurl(mesh, order=2, nograds=True)',
-        },
-        {
-            'rule': 'ngsolve-precond-after-assemble',
-            'severity': 'MODERATE',
-            'description': (
-                'BDDC Preconditioner must be registered BEFORE .Assemble() '
-                'to access element matrices. Registration after assembly '
-                'means the preconditioner cannot see the element structure.'
-            ),
-            'fix': 'Move Preconditioner(a, "bddc") BEFORE a.Assemble().',
-        },
-        {
-            'rule': 'ngsolve-missing-trace-bem',
-            'severity': 'CRITICAL',
-            'description': (
-                'BEM operators (LaplaceSL/HelmholtzSL) on HDivSurface require '
-                '.Trace() on trial/test functions. Without it, boundary-edge '
-                'DOFs get corrupted, causing wildly wrong results.'
-            ),
-            'fix': 'Use j_trial.Trace()*ds(...) instead of j_trial*ds(...).',
-        },
-        {
-            'rule': 'ngsolve-overwrite-xyz',
-            'severity': 'MODERATE',
-            'description': (
-                'Loop variable x/y/z overwrites NGSolve coordinate '
-                'CoefficientFunction. After the loop, the variable is a '
-                'scalar, not a coordinate.'
-            ),
-            'fix': 'Use different loop variable: "for xi in ..." instead of "for x in ...".',
-        },
-        {
-            'rule': 'ngsolve-vec-assign',
-            'severity': 'MODERATE',
-            'description': (
-                'Direct .vec = assignment creates symbolic expression, '
-                'not evaluated result. Must use .vec.data = to evaluate.'
-            ),
-            'fix': 'Use gfu.vec.data = ... instead of gfu.vec = ...',
-        },
-        {
-            'rule': 'ngsolve-dim2-occ',
-            'severity': 'MODERATE',
-            'description': (
-                '2D OCC geometry (Rectangle, Face) requires dim=2 parameter '
-                'in OCCGeometry(). Without it, a 3D surface mesh is generated.'
-            ),
-            'fix': 'Add dim=2: OCCGeometry(shape, dim=2)',
-        },
-        # EMPY-sourced rules
-        {
-            'rule': 'ngsolve-cg-on-saddle-point',
-            'severity': 'MODERATE',
-            'description': (
-                'CG solver on A-Omega mixed formulation (saddle-point system). '
-                'The system is indefinite, CG may diverge. Use MinRes/GMRes.'
-            ),
-            'fix': 'Replace solvers.CG() with solvers.GMRes() or MinRes().',
-        },
-        {
-            'rule': 'ngsolve-kelvin-missing-bonus-intorder',
-            'severity': 'MODERATE',
-            'description': (
-                'Kelvin domain integration without bonus_intorder. The varying '
-                'Jacobian requires higher quadrature for accurate results.'
-            ),
-            'fix': 'Add bonus_intorder=4: dx("Kelvin", bonus_intorder=4)',
-        },
-        # Docs-sourced rules
-        {
-            'rule': 'ngsolve-vectorh1-for-em',
-            'severity': 'MODERATE',
-            'description': (
-                'VectorH1 used in electromagnetic context. VectorH1 enforces full '
-                'C^0 continuity on ALL components, which is wrong for EM fields. '
-                'Use HCurl (tangential) or HDiv (normal continuity).'
-            ),
-            'fix': 'Replace VectorH1 with HCurl (for E, A) or HDiv (for B, J).',
-        },
-        {
-            'rule': 'ngsolve-pinvit-no-projection',
-            'severity': 'MODERATE',
-            'description': (
-                'PINVIT/LOBPCG eigenvalue solver on HCurl without gradient '
-                'projection. Curl-curl null space produces spurious zero eigenvalues.'
-            ),
-            'fix': 'Build gradient projection via fes.CreateGradient() and apply to preconditioner.',
-        },
-        # Induction heating rules
-        {
-            'rule': 'eddy-current-missing-complex',
-            'severity': 'HIGH',
-            'description': (
-                'HCurl/H1 space in eddy current context without complex=True. '
-                'Frequency-domain analysis requires complex-valued FE spaces.'
-            ),
-            'fix': 'Add complex=True: HCurl(mesh, order=2, complex=True)',
-        },
-        {
-            'rule': 'joule-heat-missing-conj',
-            'severity': 'MODERATE',
-            'description': (
-                'Joule heat computed as InnerProduct(E, E) instead of '
-                'InnerProduct(E, Conj(E)). Complex E*E != |E|^2.'
-            ),
-            'fix': 'Use: 0.5 * sigma * InnerProduct(E, Conj(E)).real',
-        },
         # GmshBuilder rules
         {
             'rule': 'gmsh-builder-no-context-manager',
@@ -477,7 +346,7 @@ def get_radia_lint_rules() -> str:
         },
     ]
 
-    lines = ["Radia + NGSolve Lint Rules", "=" * 50, ""]
+    lines = ["Radia Lint Rules", "=" * 50, ""]
     for r in rules_info:
         lines.append(f"[{r['severity']}] {r['rule']}")
         lines.append(f"  {r['description']}")
@@ -485,60 +354,6 @@ def get_radia_lint_rules() -> str:
         lines.append("")
 
     return '\n'.join(lines)
-
-
-@mcp.tool()
-def sparsesolv(topic: str = "all") -> str:
-    """
-    Get ngsolve-sparsesolv documentation and code examples.
-
-    ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
-    that provides IC, SGS, and BDDC preconditioners with ICCG, SGSMRTR,
-    and CG solvers. Supports auto-shift IC, complex systems, ABMC parallel
-    triangular solves, and BDDC domain decomposition.
-
-    Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-
-    Args:
-        topic: Documentation topic or code example. Options:
-            "all"              - Complete documentation
-            "overview"         - Library overview, add-on positioning, features
-            "api"              - Python API reference (solvers, preconditioners, BDDC)
-            "examples"         - Usage examples (Poisson, curl-curl, complex, BDDC, etc.)
-            "abmc"             - ABMC ordering: parallel triangular solve optimization
-            "best_practices"   - Preconditioner selection, complex systems, tips
-            "build"            - Build and installation instructions
-            "example_poisson"  - Ready-to-run: 2D Poisson with ICCG
-            "example_curlcurl" - Ready-to-run: 3D curl-curl with auto-shift IC
-            "example_eddy"     - Ready-to-run: Complex eddy current problem
-            "example_precond"  - Ready-to-run: IC/SGS with NGSolve CGSolver
-            "example_divergence" - Ready-to-run: Divergence detection
-            "example_bddc"     - Ready-to-run: BDDC preconditioner with CG
-    """
-    return get_sparsesolv_documentation(topic)
-
-
-@mcp.tool()
-def kelvin_transformation(topic: str = "all") -> str:
-    """
-    Get Kelvin transformation documentation for open boundary FEM problems.
-
-    The Kelvin transformation maps an unbounded exterior domain to a bounded
-    computational domain, enabling FEM solutions without artificial truncation.
-    Used with NGSolve for magnetostatic and electromagnetic problems.
-
-    Args:
-        topic: Documentation topic. Options:
-            "all"            - Complete documentation
-            "overview"       - Mathematical foundation and key principles
-            "h_formulation"  - H-field perturbation potential formulation
-            "a_formulation"  - Vector potential formulation (coils)
-            "3d"             - 3D sphere/solid examples
-            "adaptive"       - Adaptive mesh refinement with Kelvin
-            "identify"       - Periodic boundary Identify() best practices
-            "tips"           - Common mistakes and performance tips
-    """
-    return get_kelvin_documentation(topic)
 
 
 @mcp.tool()
@@ -571,66 +386,6 @@ def radia_usage(topic: str = "all") -> str:
             "build_and_release"   - Build, CI/CD, wheel build, PyPI publish workflow
     """
     return get_radia_documentation(topic)
-
-
-@mcp.tool()
-def ngsolve_usage(topic: str = "all") -> str:
-    """
-    Get NGSolve finite element library usage documentation.
-
-    NGSolve is a high-performance FEM library used alongside Radia for
-    electromagnetic simulation. This tool provides API patterns, best
-    practices, and common pitfalls gathered from official tutorials,
-    documentation, and community forums.
-
-    Sources:
-      - https://docu.ngsolve.org/latest/i-tutorials/
-      - https://forum.ngsolve.org/
-
-    Args:
-        topic: Documentation topic. Options:
-            "all"              - Complete documentation
-            "overview"         - Installation, workflow, direct solvers
-            "spaces"           - FE spaces (H1, HCurl, HDiv, HDivSurface, SurfaceL2)
-            "maxwell"          - Maxwell/magnetostatics (A-formulation, BDDC, materials)
-            "solvers"          - Direct & iterative solver selection guide
-            "preconditioners"  - BDDC, multigrid, Jacobi, AMG configuration
-            "bem"              - Boundary element method (ngbem, LaplaceSL, FEM-BEM coupling)
-            "mesh"             - Mesh generation (OCC geometry, STEP import, surface mesh)
-            "nonlinear"        - Newton's method for nonlinear problems
-            "pitfalls"         - Common mistakes and how to avoid them (40 items)
-            "linalg"           - Vector/matrix operations, NumPy interop
-            "formulations"     - EM formulations: A, Omega, A-Phi, T-Omega, Kelvin (EMPY)
-            "adaptive"         - Adaptive mesh refinement with ZZ error estimator (EMPY)
-    """
-    return get_ngsolve_documentation(topic)
-
-
-@mcp.tool()
-def induction_heating(topic: str = "all") -> str:
-    """
-    Get induction heating simulation documentation for NGSolve.
-
-    Complete workflow for electromagnetic induction heating analysis:
-    EM eddy current solve (A-Phi) -> Joule heat computation -> transient
-    thermal analysis, including Gmsh mesh loading, rotating workpiece,
-    VTK output, and post-processing patterns.
-
-    Based on production simulations for industrial induction heating
-    (8 kHz, 7000 A, iron/steel workpiece with copper coil).
-
-    Args:
-        topic: Documentation topic. Options:
-            "all"           - Complete documentation
-            "overview"      - Physics overview, parameters, skin depth
-            "gmsh_mesh"     - ReadGmsh loading, physical groups, boundary layers
-            "eddy_current"  - A-Phi formulation (production code with Gmsh mesh)
-            "thermal"       - Transient heat equation (theta-scheme, material props)
-            "rotating"      - Rotating workpiece (mesh.SetDeformation)
-            "postprocess"   - VTK output, point/line evaluation, CSV/MAT export
-            "pitfalls"      - Common mistakes in induction heating simulation
-    """
-    return get_induction_heating_documentation(topic)
 
 
 @mcp.tool()
