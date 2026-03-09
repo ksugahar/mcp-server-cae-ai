@@ -85,8 +85,8 @@ Domain knowledge for [NGSolve](https://ngsolve.org/) FEM, ngbem BEM, and electro
 | `lint_ngsolve_script` | Lint a Python script for NGSolve violations |
 | `lint_ngsolve_directory` | Lint all scripts in a directory |
 | `get_ngsolve_lint_rules` | List all 17 lint rules with descriptions |
-| `ngsolve_usage` | NGSolve FEM guide (14 topics, 35 pitfalls) |
-| `sparsesolv` | ngsolve-sparsesolv ICCG solver docs |
+| `ngsolve_usage` | NGSolve FEM guide (20 topics, 35 pitfalls) |
+| `sparsesolv` | ngsolve-sparsesolv Compact AMS/COCR/ICCG solver docs |
 | `kelvin_transformation` | Kelvin transform for open boundary FEM |
 | `induction_heating` | Induction heating workflow (EM + thermal) |
 
@@ -135,7 +135,7 @@ Domain knowledge for [GMSH](https://gmsh.info/) open-source mesh generation.
 - SIBC: Bessel, Dowell, ESIM for nonlinear magnetic materials
 - PRIMA model order reduction, SPICE circuit extraction
 
-### NGSolve FEM (14 topics, 35 pitfalls)
+### NGSolve FEM (20 topics, 35 pitfalls)
 - FE spaces: H1, HCurl, HDiv, L2
 - Maxwell/magnetostatics formulations
 - Solvers: PARDISO, UMFPACK, CG, GMRes
