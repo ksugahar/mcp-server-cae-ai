@@ -378,7 +378,7 @@ def sparsesolv(topic: str = "all") -> str:
 
     ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
     that provides Compact AMS, Compact AMG, IC, SGS preconditioners with
-    COCR, CG, GMRES, BiCGStab, ICCG, SGSMRTR solvers.
+    COCR, CG, GMRES, ICCG, SGSMRTR solvers.
 
     Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 

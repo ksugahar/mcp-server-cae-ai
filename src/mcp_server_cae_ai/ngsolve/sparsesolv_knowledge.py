@@ -2,7 +2,7 @@
 ngsolve-sparsesolv knowledge base for MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 2.6.1
+Version: 2.7.0
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
@@ -60,7 +60,6 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 | CG        | Conjugate Gradient (no preconditioning)          | Well-conditioned SPD systems    |
 | COCR      | Conjugate Orth. Conjugate Residual (C++ native)  | **Complex-symmetric (A^T=A)**   |
 | GMRES     | GMRES(40) with MGS orthogonalization             | Non-symmetric systems           |
-| BiCGStab  | Preconditioned BiCGStab (Van der Vorst 1992)     | Non-symmetric, fixed memory     |
 
 ## Preconditioners
 
@@ -86,7 +85,6 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 - **Compact AMS** for HCurl: header-only, TaskManager-native, no HYPRE dependency
 - **Compact AMG** for H1 subspace problems (PMIS coarsening + classical interpolation)
 - **COCR** solver: 3.5x faster than GMRES for complex-symmetric eddy current
-- **BiCGStab** solver: fixed 9-vector memory, non-symmetric systems
 - Newton-optimized IC setup: skip reordering when sparsity pattern unchanged
 - Fused SpMV+dot and AXPY+norm kernels: 5 kernels/CG-iteration (was 9 naive)
 """
@@ -126,7 +124,7 @@ Factory function that auto-detects real/complex from mat.IsComplex().
 ```python
 solver = SparseSolvSolver(
     mat,                          # NGSolve SparseMatrix (required)
-    method="ICCG",                # "ICCG", "SGSMRTR", "CG", "COCR", "BiCGStab"
+    method="ICCG",                # "ICCG", "SGSMRTR", "CG", "COCR"
     freedofs=None,                # BitArray for Dirichlet BCs (optional)
     tol=1e-10,                    # Relative convergence tolerance
     maxiter=1000,                 # Maximum iterations
@@ -384,18 +382,6 @@ gfu = GridFunction(fes)
 gfu.vec.data = solver * f.vec
 ```
 
-## 8. BiCGStab for Non-Symmetric Systems
-
-```python
-# BiCGStab with IC preconditioning -- fixed 9-vector memory
-# Suitable for non-symmetric systems where COCR (A^T=A) does not apply
-solver = SparseSolvSolver(a.mat, method="BiCGStab",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-10, maxiter=2000)
-
-gfu = GridFunction(fes)
-gfu.vec.data = solver * f.vec
-```
 """
 
 SPARSESOLV_ABMC = """
@@ -534,7 +520,6 @@ Using the wrong setting causes divergence or extremely slow convergence
 | Solver   | Memory       | Best For                          |
 |----------|-------------|-----------------------------------|
 | COCR     | 5 vectors   | Complex-symmetric (A^T = A)       |
-| BiCGStab | 9 vectors   | General non-symmetric, fixed mem  |
 | GMRES(40)| 40+ vectors | Non-symmetric, robust convergence |
 """
 
