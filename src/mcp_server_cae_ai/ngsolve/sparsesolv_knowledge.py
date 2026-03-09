@@ -1,8 +1,8 @@
 """
-ngsolve-sparsesolv knowledge base for Radia MCP server.
+ngsolve-sparsesolv knowledge base for MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 2.6.0
+Version: 2.6.1
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
@@ -28,12 +28,10 @@ against NGSolve at build time and produces a single `sparsesolv_ngsolve.pyd`
 |----------------------|----------------------------|---------------------------------------|
 | Installation         | Comes with NGSolve         | Separate `pip install` or CMake build |
 | IC preconditioner    | Not available              | IC with auto-shift, diagonal scaling  |
-| BDDC                 | Substructuring-based       | Element Schur complement + sparse coarse solver |
 | SGS preconditioner   | Not as standalone          | Standalone SGS and SGS-MRTR           |
 | Complex support      | Via built-in solvers       | Conjugate/unconjugate inner product   |
 | Parallel tri-solve   | Not available for IC       | ABMC ordering + level scheduling      |
-| Localized IC         | Not available              | Partition-level parallel IC (Fukuhara)|
-| Custom DOF ordering  | Not available              | Morton Z-order curve, RCM, etc.       |
+| Custom DOF ordering  | Not available              | RCM bandwidth reduction               |
 | Divergence detection | Not available              | Stagnation-based early termination    |
 
 **Positioning:** Complements NGSolve's built-in direct/iterative solvers with
@@ -55,13 +53,14 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 
 ## Solver Methods
 
-| Method   | Description                                      | Best For                        |
-|----------|--------------------------------------------------|---------------------------------|
-| ICCG     | CG + Incomplete Cholesky preconditioning         | SPD and semi-definite systems   |
-| SGSMRTR  | Min. Residual Truncated + Symmetric Gauss-Seidel | When IC factorization fails     |
-| CG       | Conjugate Gradient (no preconditioning)          | Well-conditioned SPD systems    |
-| COCR     | Conjugate Orth. Conjugate Residual (C++ native)  | **Complex-symmetric (A^T=A)**   |
-| GMRES    | GMRES(40) with MGS orthogonalization             | Non-symmetric systems           |
+| Method    | Description                                      | Best For                        |
+|-----------|--------------------------------------------------|---------------------------------|
+| ICCG      | CG + Incomplete Cholesky preconditioning         | SPD and semi-definite systems   |
+| SGSMRTR   | Min. Residual Truncated + Symmetric Gauss-Seidel | When IC factorization fails     |
+| CG        | Conjugate Gradient (no preconditioning)          | Well-conditioned SPD systems    |
+| COCR      | Conjugate Orth. Conjugate Residual (C++ native)  | **Complex-symmetric (A^T=A)**   |
+| GMRES     | GMRES(40) with MGS orthogonalization             | Non-symmetric systems           |
+| BiCGStab  | Preconditioned BiCGStab (Van der Vorst 1992)     | Non-symmetric, fixed memory     |
 
 ## Preconditioners
 
@@ -87,7 +86,9 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 - **Compact AMS** for HCurl: header-only, TaskManager-native, no HYPRE dependency
 - **Compact AMG** for H1 subspace problems (PMIS coarsening + classical interpolation)
 - **COCR** solver: 3.5x faster than GMRES for complex-symmetric eddy current
+- **BiCGStab** solver: fixed 9-vector memory, non-symmetric systems
 - Newton-optimized IC setup: skip reordering when sparsity pattern unchanged
+- Fused SpMV+dot and AXPY+norm kernels: 5 kernels/CG-iteration (was 9 naive)
 """
 
 SPARSESOLV_API = """
@@ -101,7 +102,6 @@ from sparsesolv_ngsolve import (
     SparseSolvSolver,      # All-in-one solver factory
     ICPreconditioner,      # IC preconditioner for use with NGSolve CGSolver
     SGSPreconditioner,     # SGS preconditioner for use with NGSolve CGSolver
-    BDDCPreconditioner,    # BDDC preconditioner (element-by-element)
     SparseSolvResult,      # Result container
 
     # Compact AMS/AMG (HCurl/H1, header-only, no HYPRE)
@@ -126,7 +126,7 @@ Factory function that auto-detects real/complex from mat.IsComplex().
 ```python
 solver = SparseSolvSolver(
     mat,                          # NGSolve SparseMatrix (required)
-    method="ICCG",                # "ICCG", "SGSMRTR", or "CG"
+    method="ICCG",                # "ICCG", "SGSMRTR", "CG", "COCR", "BiCGStab"
     freedofs=None,                # BitArray for Dirichlet BCs (optional)
     tol=1e-10,                    # Relative convergence tolerance
     maxiter=1000,                 # Maximum iterations
@@ -139,8 +139,6 @@ solver = SparseSolvSolver(
     abmc_block_size=4,            # Rows per block in ABMC aggregation
     abmc_num_colors=4,            # Target number of colors for ABMC coloring
     abmc_use_rcm=False,           # RCM bandwidth reduction before ABMC
-    abmc_block_ic=False,          # Localized IC (partition-level parallel IC)
-    block_ic_num_partitions=0     # Partitions for localized IC (0=auto)
 )
 ```
 
@@ -165,15 +163,15 @@ solver = SparseSolvSolver(
 | abmc_block_size       | int   | 4        | Rows per block in ABMC aggregation       |
 | abmc_num_colors       | int   | 4        | Target colors for ABMC graph coloring    |
 | abmc_use_rcm          | bool  | False    | RCM bandwidth reduction before ABMC      |
-| abmc_block_ic         | bool  | False    | Localized IC (partition-level parallel)   |
-| block_ic_num_partitions| int  | 0        | Partitions for localized IC (0=auto)     |
 
 ### Methods
 
 ```python
-# Set custom DOF ordering for localized IC partitioning
-# ordering[old_dof] = new_position (list of int, length = ndof)
-solver.set_custom_ordering(ordering)
+# Solve with initial guess
+result = solver.Solve(f.vec, gfu.vec)
+
+# Operator interface (zero initial guess)
+gfu.vec.data = solver * f.vec
 ```
 
 ### Usage
@@ -194,7 +192,6 @@ print(result.converged, result.iterations, result.final_residual)
 
 ```python
 pre = ICPreconditioner(mat, freedofs=None, shift=1.05)
-pre.set_custom_ordering(ordering)  # Optional: custom DOF reordering
 pre.Update()  # Must call to compute factorization
 
 # Use with NGSolve CGSolver
@@ -213,44 +210,6 @@ pre.Update()  # Must call to set up preconditioner
 inv = CGSolver(a.mat, pre, tol=1e-10)
 gfu.vec.data = inv * f.vec
 ```
-
-## BDDCPreconditioner
-
-BDDC extracts element matrices from a BilinearForm and builds a block-
-elimination BDDC preconditioner. Requires the BilinearForm (not just the
-assembled matrix) because it needs element-level information.
-
-```python
-pre = BDDCPreconditioner(a, fes)
-pre.Update()
-
-# Properties (read-only)
-print(pre.num_wirebasket_dofs)  # Number of wirebasket (vertex/edge) DOFs
-print(pre.num_interface_dofs)   # Number of interface DOFs per subdomain
-
-# Use with NGSolve CGSolver
-inv = CGSolver(a.mat, pre, tol=1e-10, maxiter=100)
-gfu.vec.data = inv * f.vec
-```
-
-Parameters:
-- `a`: Assembled BilinearForm (required)
-- `fes`: FESpace (required, used to determine DOF classification)
-
-### BDDC Performance Characteristics
-
-| Problem Type     | SparseSolv BDDC | NGSolve BDDC | IC+CG   |
-|------------------|-----------------|--------------|---------|
-| Poisson (H1)     | 2 iterations    | ~19 iters    | ~40-200 |
-| Elasticity (H1)  | 2 iterations    | ~19 iters    | ~80-400 |
-| Eddy current     | 2 iterations    | ~19 iters    | ~100+   |
-
-SparseSolv BDDC achieves ~2 iterations through element-by-element Schur
-complement (dense LU on small per-element matrices) with MKL PARDISO for the
-wirebasket coarse solve. The BDDC implementation is NGSolve-independent -- if
-you have NGSolve, use NGSolve's own BDDC instead.
-Requires Intel MKL (build prerequisite).
-Practical limit: ~5000 interface DOFs per subdomain.
 
 ## SparseSolvResult
 
@@ -425,115 +384,17 @@ gfu = GridFunction(fes)
 gfu.vec.data = solver * f.vec
 ```
 
-## 8. Localized IC (Partition-Level Parallel IC)
+## 8. BiCGStab for Non-Symmetric Systems
 
 ```python
-# Localized IC: each partition performs IC factorization independently.
-# Fully parallel setup and apply with no barriers.
-# Based on Fukuhara et al. (2009).
-solver = SparseSolvSolver(a.mat, method="ICCG",
+# BiCGStab with IC preconditioning -- fixed 9-vector memory
+# Suitable for non-symmetric systems where COCR (A^T=A) does not apply
+solver = SparseSolvSolver(a.mat, method="BiCGStab",
                            freedofs=fes.FreeDofs(),
-                           tol=1e-10, maxiter=2000,
-                           abmc_block_ic=True,
-                           block_ic_num_partitions=4)
-solver.diagonal_scaling = True
+                           tol=1e-10, maxiter=2000)
 
 gfu = GridFunction(fes)
 gfu.vec.data = solver * f.vec
-```
-
-## 9. Localized IC with Morton Z-Order Curve Ordering
-
-```python
-import numpy as np
-
-def compute_dof_coordinates(mesh, fes):
-    # Compute spatial coordinate for each DOF (average of element centroids).
-    ndof = fes.ndof
-    coords = np.zeros((ndof, 3))
-    counts = np.zeros(ndof, dtype=int)
-    for el in mesh.Elements(VOL):
-        verts = [mesh[v].point for v in el.vertices]
-        centroid = np.mean(verts, axis=0)
-        for d in fes.GetDofNrs(el):
-            if d >= 0:
-                coords[d] += centroid
-                counts[d] += 1
-    mask = counts > 0
-    coords[mask] /= counts[mask, np.newaxis]
-    return coords
-
-def morton_encode(x, y, z):
-    # Interleave bits of 21-bit integers (x, y, z) to form 63-bit Morton code.
-    def spread(v):
-        v = int(v) & 0x1fffff
-        v = (v | (v << 32)) & 0x1f00000000ffff
-        v = (v | (v << 16)) & 0x1f0000ff0000ff
-        v = (v | (v << 8))  & 0x100f00f00f00f00f
-        v = (v | (v << 4))  & 0x10c30c30c30c30c3
-        v = (v | (v << 2))  & 0x1249249249249249
-        return v
-    return spread(x) | (spread(y) << 1) | (spread(z) << 2)
-
-def compute_morton_ordering(mesh, fes):
-    # Return ordering[old_dof] = new_position based on Morton Z-order curve.
-    coords = compute_dof_coordinates(mesh, fes)
-    ndof = len(coords)
-    bbox_min = coords.min(axis=0)
-    bbox_max = coords.max(axis=0)
-    span = bbox_max - bbox_min
-    span[span == 0] = 1.0
-    max_val = (1 << 21) - 1
-    q = ((coords - bbox_min) / span * max_val).astype(np.int64)
-    q = np.clip(q, 0, max_val)
-    codes = np.array([morton_encode(q[i, 0], q[i, 1], q[i, 2]) for i in range(ndof)])
-    sorted_indices = np.argsort(codes)
-    ordering = np.empty(ndof, dtype=np.int32)
-    ordering[sorted_indices] = np.arange(ndof, dtype=np.int32)
-    return ordering.tolist()
-
-# Compute ordering and pass to solver
-morton_ord = compute_morton_ordering(mesh, fes)
-
-solver = SparseSolvSolver(a.mat, method="ICCG",
-                           freedofs=fes.FreeDofs(),
-                           tol=1e-10, maxiter=2000,
-                           abmc_block_ic=True,
-                           block_ic_num_partitions=4)
-solver.diagonal_scaling = True
-solver.set_custom_ordering(morton_ord)
-
-gfu = GridFunction(fes)
-gfu.vec.data = solver * f.vec
-```
-
-Morton Z-order curve reorders DOFs so spatially nearby DOFs get consecutive
-indices. This dramatically reduces cross-partition entries (e.g., from 54% to
-4% at P=4 for H1 problems), improving localized IC quality.
-
-## 10. BDDC Preconditioner
-
-```python
-from sparsesolv_ngsolve import BDDCPreconditioner
-from ngsolve.krylovspace import CGSolver
-
-# BDDC requires BilinearForm (not just the matrix)
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-# Create BDDC preconditioner from BilinearForm + FESpace
-pre = BDDCPreconditioner(a, fes)
-pre.Update()
-
-# Typically converges in ~2 CG iterations
-inv = CGSolver(a.mat, pre, tol=1e-10, maxiter=100, printrates=True)
-
-gfu = GridFunction(fes)
-f = LinearForm(fes)
-f += 1 * v * dx
-f.Assemble()
-gfu.vec.data = inv * f.vec
 ```
 """
 
@@ -582,10 +443,7 @@ longer dependency chains that benefit more from multi-color parallelism.
 | use_abmc             | False   | Enable ABMC ordering                         |
 | abmc_block_size      | 4       | Rows per block (2-16 typical)                |
 | abmc_num_colors      | 4       | Target colors (actual may be higher)         |
-| abmc_reorder_spmv    | False   | Also reorder SpMV (usually slower)           |
 | abmc_use_rcm         | False   | RCM bandwidth reduction before ABMC          |
-| abmc_block_ic        | False   | Localized IC (partition-level parallel IC)   |
-| block_ic_num_partitions | 0    | Partitions for localized IC (0=auto)         |
 
 ## RCM Preprocessing
 
@@ -593,34 +451,12 @@ RCM (Reverse Cuthill-McKee) bandwidth reduction is available via `abmc_use_rcm=T
 It reorders the matrix to reduce bandwidth before ABMC coloring, improving cache
 locality for both SpMV and triangular solves.
 
-## Localized IC (Fukuhara 2009)
-
-Localized IC (`abmc_block_ic=True`) divides the matrix into P contiguous row
-partitions, each performing IC factorization independently (ignoring inter-partition
-connections). This enables fully parallel Setup and Apply with no synchronization
-barriers.
-
-**Key trade-off**: More partitions = more parallelism but worse preconditioner
-quality (more cross-partition fill ignored).
-
-**DOF ordering matters**: Netgen's default DOF numbering has poor spatial locality.
-Use `set_custom_ordering()` with Morton Z-order curve or RCM (`abmc_use_rcm=True`)
-to ensure spatially nearby DOFs are contiguous, minimizing cross-partition entries.
-
-| Ordering      | Cross-partition (P=4) | Iteration ratio |
-|---------------|-----------------------|-----------------|
-| Naive (Netgen)| ~54%                  | ~1.5x           |
-| RCM           | ~10%                  | ~1.2x           |
-| Morton Z-curve| ~4%                   | ~1.1-1.2x       |
-
 ## Known Limitations
 
 - `abmc_num_colors` is a lower bound; the actual number of colors depends on
   the graph structure and may be higher for complex meshes
 - `abmc_reorder_spmv=False` (default) is usually faster because FEM mesh
   ordering has better cache locality for SpMV than ABMC ordering
-- Localized IC quality degrades for HCurl problems due to wider stencils and
-  imprecise edge DOF coordinate estimation
 
 ## Implementation Details
 
@@ -631,6 +467,10 @@ The ABMC pipeline in the IC preconditioner:
 Parallel execution uses a **persistent parallel region** with SpinBarrier
 synchronization (one `parallel_for(nthreads, ...)` call with barriers between
 color levels), avoiding per-level thread dispatch overhead.
+
+Fused-dot optimization: The preconditioner apply can fuse dot(r, z) computation
+into the backward substitution phase, eliminating one kernel launch per CG iteration
+(5 -> 4 kernels/iteration).
 """
 
 SPARSESOLV_BEST_PRACTICES = """
@@ -681,34 +521,21 @@ Using the wrong setting causes divergence or extremely slow convergence
 - For semi-definite (curl-curl): use `auto_shift=True` with `shift=1.0`
 - Higher shift = more stable but slower convergence
 - `diagonal_scaling=True` often helps for poorly scaled matrices
+- Auto-shift uses exponential backoff (increment *= 2), so restart count is O(log n)
 
 ## ABMC Ordering
 
 - Only enable for >25K DOFs with multi-threaded execution
 - Default `abmc_block_size=4, abmc_num_colors=4` works well for most cases
-- Keep `abmc_reorder_spmv=False` (default) for better SpMV cache locality
 - Consider `abmc_use_rcm=True` for bandwidth reduction
 
-## Localized IC (Block IC)
+## Solver Selection for Non-Symmetric Systems
 
-- Enable with `abmc_block_ic=True, block_ic_num_partitions=P`
-- Fully parallel setup and apply — no synchronization barriers
-- **Critical**: Use `set_custom_ordering()` with Morton Z-order curve for best
-  partition quality. Without spatial reordering, cross-partition ratio is ~54%
-  (P=4), causing ~1.5x iteration increase. With Morton ordering, drops to ~4%.
-- Works well for H1 problems (P=2-4: ~1.1-1.2x iteration ratio)
-- Less effective for HCurl due to wider stencils
-- ABMC (use_abmc) generally outperforms localized IC at p>=3
-
-## BDDC Preconditioner
-
-- Best for h-refinement studies: iteration count stays constant (~2)
-- Requires `BilinearForm` (not just assembled matrix) for element extraction
-- Memory-intensive for large interface DOF counts (>5000 per subdomain)
-- Coarse solver: MKL PARDISO (direct, no options needed)
-- NGSolve-independent: BDDC core + MKL PARDISO, no NGSolve solver dependency
-- If you have NGSolve, use NGSolve's own BDDC instead
-- Requires Intel MKL (build prerequisite)
+| Solver   | Memory       | Best For                          |
+|----------|-------------|-----------------------------------|
+| COCR     | 5 vectors   | Complex-symmetric (A^T = A)       |
+| BiCGStab | 9 vectors   | General non-symmetric, fixed mem  |
+| GMRES(40)| 40+ vectors | Non-symmetric, robust convergence |
 """
 
 SPARSESOLV_BUILD = """
@@ -718,7 +545,6 @@ SPARSESOLV_BUILD = """
 
 - CMake 3.16+
 - C++17 compiler (MSVC 2022, GCC 10+, Clang 10+)
-- Intel MKL (required for BDDC coarse solver via PARDISO)
 - NGSolve installed (from source or pip) with CMake config files
 - pybind11 (fetched automatically by CMake if not found)
 
@@ -933,196 +759,164 @@ print(f"Iterations: {result.iterations} (max: 5000)")
 print(f"Final residual: {result.final_residual:.2e}")
 '''
 
-SPARSESOLV_EXAMPLE_BDDC = '''# BDDC Preconditioner with CG (mesh-independent convergence)
-from ngsolve import *
-from ngsolve.krylovspace import CGSolver
-from sparsesolv_ngsolve import BDDCPreconditioner
-
-mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
-fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
-u, v = fes.TnT()
-
-a = BilinearForm(fes)
-a += grad(u) * grad(v) * dx
-a.Assemble()
-
-f = LinearForm(fes)
-f += 1 * v * dx
-f.Assemble()
-
-# BDDC requires BilinearForm + FESpace (not just the matrix)
-pre = BDDCPreconditioner(a, fes, coarse_inverse="sparsecholesky")
-pre.Update()
-
-print(f"Wirebasket DOFs: {pre.num_wirebasket_dofs}")
-print(f"Interface DOFs: {pre.num_interface_dofs}")
-
-# Typically converges in ~2 iterations (mesh-independent!)
-inv = CGSolver(a.mat, pre, tol=1e-10, maxiter=100, printrates=True)
-
-gfu = GridFunction(fes)
-gfu.vec.data = inv * f.vec
-'''
-
 
 SPARSESOLV_COMPACT_AMS = """
-# Compact AMS 前処理 (HCurl 渦電流)
+# Compact AMS Preconditioner (HCurl Eddy Current)
 
-## 概要
+## Overview
 
-Compact AMS (Auxiliary-space Maxwell Solver) は HCurl curl-curl + mass 系に
-対する**ヘッダーオンリー・HYPRE不要**の前処理です。Hiptmair-Xu (2007) の
-補助空間法に基づき、CompactAMG をサブスペースソルバー、l1-Jacobi を
-ファインスムーザーとして使用します。全て TaskManager ネイティブで、
-外部ライブラリ依存がありません。
+Compact AMS (Auxiliary-space Maxwell Solver) is a **header-only, HYPRE-free**
+preconditioner for HCurl curl-curl + mass systems. Based on Hiptmair-Xu (2007)
+auxiliary space method, using CompactAMG as subspace solver and l1-Jacobi
+as fine smoother. Fully TaskManager-native, no external library dependencies.
 
-**使いどき**: HCurl order=1 の問題（任意スケール）
-- 実数磁気静解析: CompactAMSPreconditioner + CG
-- 複素渦電流: ComplexCompactAMSPreconditioner + COCR
+**When to use**: HCurl order=1 problems (any scale)
+- Real magnetostatics: CompactAMSPreconditioner + CG
+- Complex eddy current: ComplexCompactAMSPreconditioner + COCR
 
-**ICCGに対する優位性**: メッシュサイズに依存しない反復回数。
-ICCGは O(h^-1) で増加、Compact AMS は一定（~52回）。
+**Advantage over ICCG**: Mesh-size independent iteration count.
+ICCG grows as O(h^-1), Compact AMS stays constant (~52 iters).
 
-## 理論: Hiptmair-Xu 補助空間
+## Theory: Hiptmair-Xu Auxiliary Space
 
-HCurl 空間は Helmholtz 分解を持つ: u = grad(phi) + z
-（phi は H1、z はカールフリー補空間）
+HCurl space has Helmholtz decomposition: u = grad(phi) + z
+(phi in H1, z in curl-free complement)
 
-Compact AMS はこれを2つの補助空間で活用:
-1. **G補正**（勾配）: 離散勾配 G が H1 -> HCurl を写像。
-   スカラー CompactAMG がカーネル成分を解く。
-2. **Pi補正**（Nedelec補間）: Pi_d = diag(coord_d) * G (d = x, y, z)。
-   ベクトル CompactAMG が各成分を解く。
-3. **ファインスムーザー**: l1-Jacobi（完全並列、対称）。
+Compact AMS exploits this with two auxiliary spaces:
+1. **G correction** (gradient): Discrete gradient G maps H1 -> HCurl.
+   Scalar CompactAMG solves the kernel component.
+2. **Pi correction** (Nedelec interpolation): Pi_d = diag(coord_d) * G (d = x, y, z).
+   Vector CompactAMG solves each component.
+3. **Fine smoother**: l1-Jacobi (fully parallel, symmetric).
 
-乗法 V-サイクルとして結合:
-cycle_type=1（デフォルト）: smooth -> G補正 -> Pi補正 -> G補正 -> smooth
+Combined as multiplicative V-cycle:
+cycle_type=1 (default): smooth -> G correction -> Pi correction -> G correction -> smooth
 
-## なぜ COCR（GMRES ではなく）
+## Why COCR (not GMRES)
 
-Compact AMS は **l1-Jacobi**（対称スムーザー）を使用するため、
-前処理が**対称**になる。これにより **COCR**（短再帰、5ベクトル）が
-使え、GMRES（mベクトル保存）は不要。結果: GMRES の 3.5倍高速。
+Compact AMS uses **l1-Jacobi** (symmetric smoother), making the preconditioner
+**symmetric**. This enables **COCR** (short recurrence, 5 vectors) instead of
+GMRES (m vectors). Result: 3.5x faster than GMRES.
 
-| ソルバー | 前処理の対称性      | メモリ    | 反復数（197K DOFs）|
-|---------|--------------------|-----------|--------------------|
-| COCR    | 対称（l1-Jacobi）  | 5ベクトル | 168                |
-| GMRES   | 任意               | mベクトル | 384                |
+| Solver | Preconditioner symmetry | Memory    | Iterations (197K DOFs) |
+|--------|------------------------|-----------|-----------------------|
+| COCR   | Symmetric (l1-Jacobi)  | 5 vectors | 168                   |
+| GMRES  | Any                    | m vectors | 384                   |
 
-## 複素系の Re/Im 分割
+## Complex Re/Im Splitting
 
-複素系 (K + jw*sigma*M) * x = b の処理:
-1. 実数 SPD 補助行列を構築: A_real = K + eps*M + |omega|*sigma*M_cond
-2. ComplexCompactAMS が2つの独立 AMS インスタンスを作成
-3. 適用: y_re = AMS(x_re), y_im = AMS(x_im) を TaskManager で並列実行
+For complex system (K + jw*sigma*M) * x = b:
+1. Build real SPD auxiliary matrix: A_real = K + eps*M + |omega|*sigma*M_cond
+2. ComplexCompactAMS creates two independent AMS instances
+3. Apply: y_re = AMS(x_re), y_im = AMS(x_im) in TaskManager parallel
 
-`a_real` 行列は実数・SPD で、**実数** HCurl 空間で構築する必要がある
-（同じメッシュ、同じ次数、同じ nograds、同じ Dirichlet BC、ただし complex=False）。
+The `a_real` matrix must be real SPD, built in a **real** HCurl space
+(same mesh, order, nograds, Dirichlet BC, but complex=False).
 
-### なぜ a_real が必要か
+### Why a_real is needed
 
-AMS の補助空間補正（G, Pi）は実数演算で動作する。
-複素系行列 A = K + jw*sigma*M は直接使えない。
-実数補助行列 `A_real = K + |omega|*sigma*M + eps*M` は虚部なしで
-同じスペクトル構造を捕捉する。
+AMS auxiliary space corrections (G, Pi) operate on real arithmetic.
+Complex system matrix A = K + jw*sigma*M cannot be used directly.
+Real auxiliary matrix `A_real = K + |omega|*sigma*M + eps*M` captures
+the same spectral structure without imaginary part.
 
-`eps*M`（eps ~ 1e-6）は CompactAMG 内部の IC 分解を安定化する。
-これがないと、純粋な curl-curl 行列で IC が破綻する可能性がある。
+`eps*M` (eps ~ 1e-6) stabilizes IC factorization inside CompactAMG.
+Without it, IC may break down on pure curl-curl matrices.
 
-## ベンチマーク: AMS vs ICCG スケーリング
+## Benchmark: AMS vs ICCG Scaling
 
-鉄心渦電流問題（mu_r=1000, sigma=1e6, 30 kHz）:
+Iron-core eddy current (mu_r=1000, sigma=1e6, 30 kHz):
 
-| DOFs   | ICCG 反復数 | AMS+COCR 反復数 | AMS 高速化      |
-|-------:|----------:|--------------:|-----------------|
-| 2,728  | 97        | 46            | 1.5倍少ない     |
-| 6,382  | 147       | 52            | 2.8倍少ない     |
-| 19,357 | 234       | 52            | **4.5倍少ない、2.6倍高速** |
-| 197K   | 17,178    | 168           | **100倍少ない** |
+| DOFs   | ICCG iters | AMS+COCR iters | AMS speedup         |
+|-------:|---------:|--------------:|---------------------|
+| 2,728  | 97        | 46            | 1.5x fewer          |
+| 6,382  | 147       | 52            | 2.8x fewer          |
+| 19,357 | 234       | 52            | **4.5x fewer, 2.6x faster** |
+| 197K   | 17,178    | 168           | **100x fewer**      |
 
-AMS の反復回数はメッシュ細分化によらず**一定**（46-52回）。
-ICCG の反復回数は O(h^-1) で**増加**する。
-BDDC (inverse="bddc") は複素 HCurl 行列に**非対応**。
+AMS iteration count stays **constant** (46-52) under mesh refinement.
+ICCG iteration count **grows** as O(h^-1).
 
-## ソルバー比較
+## Solver Comparison
 
-| 特性             | ICCG           | Compact AMS+COCR    | BDDC (NGSolve)  |
+| Property         | ICCG           | Compact AMS+COCR    | BDDC (NGSolve)  |
 |-----------------|----------------|---------------------|-----------------|
-| 対象            | 汎用 SPD       | HCurl (order=1)     | 任意（実数のみ） |
-| 複素対応        | あり           | **あり**            | なし            |
-| 反復数スケーリング | h依存         | **h非依存**         | h非依存         |
-| 外部依存        | なし           | **なし（ヘッダーのみ）** | NGSolve      |
-| Krylov ソルバー | CG / COCR      | CG / **COCR**       | CG             |
-| メモリ          | 最小（5ベクトル）| 中（AMGレベル）    | 中〜大         |
-| セットアップコスト | 低           | 中（AMGセットアップ）| 高             |
-| 高次要素（p>1） | 対応           | **p=1のみ**         | 対応           |
+| Target          | General SPD    | HCurl (order=1)     | Any (real only) |
+| Complex support | Yes            | **Yes**             | No              |
+| Iteration scaling | h-dependent  | **h-independent**   | h-independent   |
+| External deps   | None           | **None (header-only)** | NGSolve      |
+| Krylov solver   | CG / COCR      | CG / **COCR**       | CG              |
+| Memory          | Minimal (5 vec)| Medium (AMG levels) | Medium-Large    |
+| Setup cost      | Low            | Medium (AMG setup)  | High            |
+| High-order (p>1)| Yes            | **p=1 only**        | Yes             |
 
 ## Python API
 
 ```python
 import sparsesolv_ngsolve as ssn
 
-# 実数 Compact AMS（実数 SPD HCurl 磁気静解析用）
+# Real Compact AMS (for real SPD HCurl magnetostatics)
 pre_real = ssn.CompactAMSPreconditioner(
     mat=a.mat,                     # SparseMatrix<double>
-    grad_mat=G_mat,                # 離散勾配 (fes.CreateGradient())
-    freedofs=fes.FreeDofs(),       # Dirichlet マスク
-    coord_x=cx, coord_y=cy, coord_z=cz,  # 頂点座標
-    cycle_type=1,                  # 1 = デフォルト乗法サイクル
+    grad_mat=G_mat,                # Discrete gradient (fes.CreateGradient())
+    freedofs=fes.FreeDofs(),       # Dirichlet mask
+    coord_x=cx, coord_y=cy, coord_z=cz,  # Vertex coordinates
+    cycle_type=1,                  # 1 = default multiplicative cycle
     print_level=0)
 
-# 複素 Compact AMS（TaskManager Re/Im 並列）
+# Complex Compact AMS (TaskManager Re/Im parallel)
 pre_complex = ssn.ComplexCompactAMSPreconditioner(
-    a_real_mat=a_real.mat,         # 実数 SPD 補助行列（複素ではない!）
-    grad_mat=G_mat,                # fes_real.CreateGradient() から取得
-    freedofs=fes_real.FreeDofs(),  # 実数空間の FreeDofs
+    a_real_mat=a_real.mat,         # Real SPD auxiliary matrix (NOT complex!)
+    grad_mat=G_mat,                # From fes_real.CreateGradient()
+    freedofs=fes_real.FreeDofs(),  # Real space FreeDofs
     coord_x=cx, coord_y=cy, coord_z=cz,
-    ndof_complex=0,                # 0 = a_real_mat から自動導出
+    ndof_complex=0,                # 0 = auto-derive from a_real_mat
     cycle_type=1,
     print_level=0)
 
-# COCR ソルバー（複素対称、短再帰）
+# COCR solver (complex-symmetric, short recurrence)
 solver = ssn.COCRSolver(a.mat, pre_complex, maxiter=500, tol=1e-10,
                         freedofs=fes.FreeDofs())
 gfu = GridFunction(fes)
 with TaskManager():
     gfu.vec.data = solver * f.vec
 
-# H1 問題用 Compact AMG（Poisson、熱伝導）
+# H1 Compact AMG (for Poisson, heat conduction)
 pre_h1 = ssn.CompactAMGPreconditioner(
     mat=a_h1.mat,
     freedofs=fes_h1.FreeDofs(),
-    theta=0.25,                    # 強接続閾値
+    theta=0.25,                    # Strong connection threshold
     print_level=0)
 
-# Newton 反復用 Update()（幾何情報保存、高速再構築）
-a_real.Assemble()  # 行列値が変更された
-pre_complex.Update(a_real.mat)  # 新しい行列で再構築
+# Newton iteration Update() (preserves geometric info, fast rebuild)
+a_real.Assemble()  # Matrix values changed
+pre_complex.Update(a_real.mat)  # Rebuild with new matrix
 ```
 
-## COCR ソルバー（複素対称）
+## COCR Solver (Complex-Symmetric)
 
-複素対称系（A^T = A）に対称前処理を組み合わせる場合、
-COCR (Sogabe-Zhang 2007) が最適: 短再帰、||A*r|| を最小化。
+For complex-symmetric systems (A^T = A) with symmetric preconditioner,
+COCR (Sogabe-Zhang 2007) is optimal: short recurrence, minimizes ||A*r||.
 
 ```python
-# スタンドアロン COCR
+# Standalone COCR
 solver = ssn.COCRSolver(a.mat, pre, maxiter=500, tol=1e-10)
 gfu.vec.data = solver * f.vec
 
-# SparseSolvSolver ディスパッチ経由
+# Via SparseSolvSolver dispatch
 solver = ssn.SparseSolvSolver(a.mat, method="COCR",
     freedofs=fes.FreeDofs(), tol=1e-10, maxiter=1000)
 ```
 
-注意: COCR は非共役内積 (x^T y, x^H y ではない) を使用。
-エルミート系には CG with conjugate=True を使用。
+Note: COCR uses unconjugated inner product (x^T y, not x^H y).
+For Hermitian systems, use CG with conjugate=True.
 
-## 制限事項
+## Limitations
 
-1. **order=1 のみ**: 1次 Nedelec 要素が必要。高次は NGSolve BDDC（実数）か直接法。
-2. **nograds=True 必須**: 勾配 DOF は AMS の G 補正で処理。
-3. **TaskManager() 必須**: `with TaskManager():` ブロック内で実行する必要がある。
+1. **order=1 only**: First-order Nedelec elements required. For high-order, use
+   NGSolve BDDC (real) or direct solver.
+2. **nograds=True required**: Gradient DOFs are handled by AMS G correction.
+3. **TaskManager() required**: Must run inside `with TaskManager():` block.
 """
 
 SPARSESOLV_EXAMPLE_COMPACT_AMS = '''# Compact AMS + COCR for Complex Eddy Current
@@ -1211,7 +1005,6 @@ def get_sparsesolv_documentation(topic: str = "all") -> str:
         "example_eddy": SPARSESOLV_EXAMPLE_EDDY,
         "example_precond": SPARSESOLV_EXAMPLE_PRECOND,
         "example_divergence": SPARSESOLV_EXAMPLE_DIVERGENCE,
-        "example_bddc": SPARSESOLV_EXAMPLE_BDDC,
         "compact_ams": SPARSESOLV_COMPACT_AMS,
         "example_compact_ams": SPARSESOLV_EXAMPLE_COMPACT_AMS,
         # Legacy aliases
