@@ -3,8 +3,8 @@ NGSolve FEM MCP Server
 
 Provides tools for:
 - Linting Python scripts against NGSolve conventions (17 rules)
-- NGSolve FEM usage documentation (12 topics incl. EM formulations, adaptive)
-- ngsolve-sparsesolv (ICCG/BDDC) solver documentation
+- NGSolve FEM usage documentation (20 topics incl. EM formulations, material modeling)
+- ngsolve-sparsesolv (Compact AMS/COCR/ICCG) solver documentation
 - Kelvin transformation reference for open boundary FEM
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
 
@@ -361,6 +361,12 @@ def ngsolve_usage(topic: str = "all") -> str:
             "adaptive"         - Adaptive mesh refinement with ZZ error estimator (EMPY)
             "darwin"           - Darwin approximation, Surface Impedance BC, Extended Darwin
             "esim"             - ESIM: nonlinear Zs(H,w) Robin BC for any FEM formulation
+            "treecotree"       - Tree-cotree splitting, low-freq stability, field-circuit coupling
+            "pml"              - Perfectly Matched Layers for open boundary (full-wave)
+            "decomposition"    - Domain decomposition: FETI-DP, BDDC, DFDD, AWE/SSP
+            "material"         - Material modeling: anisotropy, BH curves, Fixed-Point method
+            "ironloss"         - Iron loss estimation: decomposition, FEM computation, steel grades
+            "practical"        - Practical techniques: voltage source, force/torque, rotation, coupling
     """
     return get_ngsolve_documentation(topic)
 
@@ -371,8 +377,8 @@ def sparsesolv(topic: str = "all") -> str:
     Get ngsolve-sparsesolv documentation and code examples.
 
     ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
-    that provides IC, SGS, BDDC, and HYPRE AMS preconditioners with ICCG,
-    SGSMRTR, CG, COCR, and GMRES solvers.
+    that provides Compact AMS, Compact AMG, IC, SGS preconditioners with
+    COCR, CG, GMRES, ICCG, SGSMRTR solvers.
 
     Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 
@@ -383,7 +389,7 @@ def sparsesolv(topic: str = "all") -> str:
             "api"              - Python API reference (solvers, preconditioners)
             "examples"         - Usage examples (Poisson, curl-curl, complex, etc.)
             "abmc"             - ABMC ordering: parallel triangular solve optimization
-            "hypre_ams"        - HYPRE AMS: theory, benchmarks, solver comparison
+            "compact_ams"      - Compact AMS: theory, benchmarks, COCR solver
             "best_practices"   - Preconditioner selection, complex systems, tips
             "build"            - Build and installation instructions
             "example_poisson"  - Ready-to-run: 2D Poisson with ICCG
@@ -392,7 +398,7 @@ def sparsesolv(topic: str = "all") -> str:
             "example_precond"  - Ready-to-run: IC/SGS with NGSolve CGSolver
             "example_divergence" - Ready-to-run: Divergence detection
             "example_bddc"     - Ready-to-run: BDDC preconditioner with CG
-            "example_hypre_ams" - Ready-to-run: HYPRE AMS + GMRES eddy current
+            "example_compact_ams" - Ready-to-run: Compact AMS + COCR eddy current
     """
     return get_sparsesolv_documentation(topic)
 

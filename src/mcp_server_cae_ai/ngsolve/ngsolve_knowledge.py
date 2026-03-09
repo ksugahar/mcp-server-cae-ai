@@ -2891,6 +2891,957 @@ and the material is nonlinear, use ESIM.
 """
 
 
+NGSOLVE_TREE_COTREE = """
+# Tree-Cotree Splitting and Low-Frequency Stabilization
+
+Reference: J.-M. Jin, "The Finite Element Method in Electromagnetics,"
+3rd ed., Ch.12.9.3 (Wiley, 2014).
+
+## The Low-Frequency Breakdown Problem
+
+The A formulation curl-curl + mass system:
+
+```
+[S + jw*T]{A} = {f}
+where S_ij = integral(1/mu * curl(Ni) . curl(Nj) dV)   (curl-curl)
+      T_ij = integral(sigma * Ni . Nj dV)               (mass/conductivity)
+```
+
+At low frequency (w -> 0) or large time step (dt -> infinity), the mass term
+vanishes, and [S] alone is singular because curl(grad(phi)) = 0. The
+null space of S consists of all gradient fields. This causes:
+- Direct solvers: loss of accuracy due to near-singular matrix
+- Iterative solvers: very slow convergence or divergence
+
+## Tree-Cotree Splitting (TCS)
+
+TCS decomposes edge DOFs into **gradient** (tree) and **solenoidal** (cotree) parts:
+
+1. Build a spanning tree connecting all mesh nodes without loops
+2. Tree edges -> gradient basis functions (replace with grad(Ni))
+3. Cotree edges -> solenoidal basis functions (linearly independent curls)
+4. Total DOF count unchanged: N_tree = N_free_nodes
+
+```
+E = sum_{free nodes} U_i * grad(Ni) + sum_{cotree edges} E_j * Nj
+    |--- irrotational part ---|   |--- solenoidal part ---|
+```
+
+After TCS + diagonal scaling, the iteration count is INDEPENDENT of
+frequency or time step size (verified from dt=50ps to dt=5000ns).
+
+## NGSolve Implementation
+
+NGSolve's hierarchical basis (order >= 2) already separates gradient
+and rotational DOFs, so explicit TCS is only needed for lowest-order (order=0).
+
+```python
+# For order >= 1: nograds=True removes gradient DOFs automatically
+fes = HCurl(mesh, order=1, nograds=True)
+# This is equivalent to TCS for higher-order elements
+
+# For lowest-order (order=0): use type1=True + nograds=True
+fes = HCurl(mesh, order=0, type1=True, nograds=True)
+```
+
+### The Schoberl-Zaglmayr Hierarchical Basis
+
+NGSolve uses the Schoberl-Zaglmayr high-order HCurl basis which
+decomposes into gradient and non-gradient (rotational-like) DOFs at
+each polynomial order. This is the generalization of TCS to arbitrary order.
+
+```
+HCurl DOFs = {edge DOFs (order 0)} + {face DOFs} + {volume DOFs}
+           = {gradient (tree)} + {non-gradient (cotree)}
+           = {low-order grad} + {low-order rot} + {high-order grad} + {high-order rot}
+```
+
+The `nograds=True` flag removes ALL gradient DOFs from the space,
+leaving only solenoidal components. This:
+- Eliminates the null space of curl-curl
+- Improves conditioning at low frequency
+- Is ESSENTIAL for magnetostatic A formulation
+
+### When NOT to use nograds=True
+
+- A-Phi eddy current: gradient DOFs couple with Phi -> keep them
+- T-Omega: T space needs nograds=True (curl(T) = J must be solenoidal)
+- Time-domain: gradient DOFs needed for dA/dt -> use regularization instead
+
+## Regularization Alternative (When Gradients Must Be Kept)
+
+Add a small mass term to regularize the curl-curl operator:
+
+```python
+# Regularization parameter: epsilon * mass term
+eps = 1e-6 / mu_0  # Small enough not to affect physics
+a += eps * u * v * dx
+
+# Or use the Coulomb gauge penalty:
+a += alpha * div(u) * div(v) * dx  # Penalty on div(A) != 0
+```
+
+## Field-Circuit Coupling (Hybrid Analysis)
+
+Embed lumped circuit elements (R, L, C) into the FEM system by modifying
+edge DOFs along the circuit path C:
+
+```python
+# For a resistor R on edge k:
+# K_kk += Y * L_k^2   where Y = 1/R and L_k = edge length
+# For a capacitor C: modify mass matrix T_kk += C * C_kk
+# For an inductor L: modify stiffness S_kk += (1/L) * C_kk
+```
+
+### MNA Coupling with External Circuit
+
+For complex circuits, use Modified Nodal Analysis:
+
+```
+[K0    0    delta*C ] {E  }   {b_prev}
+[0     Y    B^T     ] {V  } = {J_CKT }
+[delta*C^T  B    0  ] {J_CP}   {0     }
+```
+
+where:
+- K0: FEM matrix
+- Y: circuit admittance matrix (MNA)
+- C: edge-to-port coupling matrix (C_ip = integral Ni . L_hat dl on port p)
+- B: port selection matrix
+- delta = 1/(2*dt) for Newmark-beta time stepping
+
+The system is symmetric if Y is symmetric, and always stable.
+
+## Key References
+
+- Jin Ch.12.9.3: Tree-cotree splitting for low-frequency stabilization
+- Jin Ch.12.9.1-2: Hybrid field-circuit analysis (frequency/time domain)
+- Schoberl & Zaglmayr (2005): High-order Nedelec elements with
+  explicit gradient-rotational decomposition
+- Wang & Jin (2010): TCS for time-domain FEM, 5 orders of magnitude in dt
+"""
+
+NGSOLVE_PML = """
+# Perfectly Matched Layers (PML) in NGSolve
+
+Reference: J.-M. Jin, "The Finite Element Method in Electromagnetics,"
+3rd ed., Ch.9.6 (Wiley, 2014).
+
+## Concept
+
+PML is a coordinate-stretching technique that creates a reflectionless
+absorbing layer. Complex-valued stretching factors attenuate waves:
+
+```
+s_x = s' - j*s"    (s' >= 1 for evanescent, s" >= 0 for propagating)
+```
+
+The wave impedance is NOT affected by stretching -> zero reflection
+at the PML interface (regardless of angle, frequency, polarization).
+
+## Anisotropic Absorber Interpretation
+
+PML is equivalent to an anisotropic material with:
+
+```
+epsilon_PML = eps * Lambda
+mu_PML = mu * Lambda
+
+where Lambda = diag(s_y*s_z/s_x, s_x*s_z/s_y, s_x*s_y/s_z)
+```
+
+This interpretation makes FEM implementation straightforward: just
+modify the material tensors in the PML region.
+
+## NGSolve PML Implementation
+
+NGSolve has built-in PML support via `mesh.SetPML()`:
+
+```python
+from ngsolve import *
+
+# Create geometry with PML region
+geo = SplineGeometry()
+# ... define inner domain + PML shell ...
+mesh = Mesh(geo.GenerateMesh())
+
+# Set PML with polynomial grading
+mesh.SetPML(pml.Cartesian(mins=(-1,-1), maxs=(1,1),
+                           alpha=2j))  # alpha = absorption strength
+
+# Or radial PML for spherical domains:
+mesh.SetPML(pml.Radial(rad=1.0, alpha=1j))
+
+# FEM formulation is unchanged - PML modifies the Jacobian
+fes = HCurl(mesh, order=2, complex=True)
+u, v = fes.TnT()
+
+a = BilinearForm(fes)
+a += 1/mu * curl(u) * curl(v) * dx - omega**2 * eps * u * v * dx
+a.Assemble()
+```
+
+## PML Parameter Selection
+
+### Polynomial Grading (Essential for Discretization Error)
+
+```
+sigma(x) = sigma_max * (x/L)^m    m = 2 (parabolic, recommended)
+```
+
+A constant sigma causes large discretization error at the PML interface.
+Polynomial grading ensures smooth transition.
+
+### Key Parameters
+
+| Parameter | Typical Value | Effect |
+|-----------|---------------|--------|
+| PML thickness L | 0.25*lambda | 10-20 elements in PML |
+| sigma_max | Optimized (5-6 for lambda/20 mesh) | Absorption strength |
+| Polynomial order m | 2 (parabolic) | Smoothness of grading |
+| s' (real part) | 1.0 | Set > 1 to attenuate evanescent waves |
+
+### Metal-backed PML Reflection
+
+```
+|R| = exp(-2 * k * s" * L * cos(theta))
+```
+
+Key implications:
+- Reflection is angle-dependent (worse at grazing incidence)
+- Increase s"*L product to reduce reflection
+- But too large s" increases discretization error
+
+## Advanced Techniques
+
+### PML + ABC (Combined)
+
+Replace metal backing with an ABC for better absorption at grazing angles:
+
+```python
+# 1st-order ABC on PML outer boundary
+a += -1j*k0 * u.Trace() * v.Trace() * ds("pml_outer")
+```
+
+Combined PML+ABC is significantly better than either alone.
+
+### Complementary PML (COM-PML)
+
+Solve the problem TWICE:
+1. PEC-backed PML (reflection = +R)
+2. PMC-backed PML (reflection = -R)
+3. Average the solutions -> error reduces from O(R) to O(R^2)
+
+```python
+# PEC-backed: standard Dirichlet on outer boundary
+# PMC-backed: Neumann on outer boundary
+# Average: u = (u_PEC + u_PMC) / 2
+```
+
+COM-PML achieves ~50 dB error reduction with only 2x computational cost.
+
+## When to Use PML vs Other Open Boundary Methods
+
+| Method | Best For | Limitation |
+|--------|----------|------------|
+| **PML** | Full-wave, broadband | Adds mesh volume, needs optimization |
+| **ABC (1st/2nd order)** | Simple, narrowband | Low accuracy at wide angles |
+| **FEM-BEM coupling** | Exact open boundary | Dense BEM matrix |
+| **Radia (BEM)** | Magnetostatic/MQS | No wave propagation |
+
+**For Radia users**: PML is NOT needed for magnetostatic or MQS problems.
+Radia's integral method provides exact open boundary naturally.
+PML is relevant for high-frequency (wave) problems in NGSolve.
+
+## Practical Tips
+
+1. **Start with radial PML** for 3D scattering/radiation problems
+2. **Use polynomial grading** (m=2) - never constant sigma
+3. **Optimize sigma_max** for your mesh density (start with 5-6 for lambda/20)
+4. **Place PML at least 0.25*lambda from scatterer** (closer with COM-PML)
+5. **Verify by varying PML thickness** - solution should be insensitive
+6. **For waveguide problems**: use PML at waveguide ends, not sides
+
+## Key References
+
+- Berenger (1994): Original PML concept
+- Chew & Weedon (1994): Coordinate stretching interpretation
+- Sacks et al. (1995): Anisotropic absorber interpretation
+- Jin & Chew (1996): PML optimization, combined PML+ABC
+- Jin et al. (1997): Complementary PML
+"""
+
+NGSOLVE_DOMAIN_DECOMP = """
+# Domain Decomposition for Large-Scale EM Problems
+
+Reference: J.-M. Jin, "The Finite Element Method in Electromagnetics,"
+3rd ed., Ch.14.3 (Wiley, 2014).
+
+## FETI-DP Method (Finite Element Tearing and Interconnecting - Dual-Primal)
+
+FETI-DP decomposes the computational domain into subdomains and solves
+a global interface system iteratively. It is the most scalable domain
+decomposition method for electromagnetics.
+
+### Algorithm Overview
+
+1. **Tearing**: Partition domain into Ns subdomains (METIS)
+2. **Local factorization**: Factor each subdomain matrix [K_rr] independently
+3. **Interface system**: Solve for Lagrange multipliers {lambda} on interfaces
+4. **Recovery**: Compute subdomain solutions from factored matrices
+
+```
+Three types of unknowns:
+- Interior: solved locally per subdomain
+- Interface (dual): connected by Lagrange multipliers
+- Corner (primal): assembled globally for coarse problem
+```
+
+### Interface System
+
+```
+[F_rr - F_rc * K_cc^{-1} * F_rc^T] {lambda} = {d_r - F_rc * K_cc^{-1} * f_c}
+```
+
+where F_rr and F_rc involve subdomain-local forward/backward substitutions.
+Solved by CG (SPD) or GMRES (non-SPD).
+
+### Low-Frequency Stability
+
+For magnetostatic and eddy current problems, tree-cotree gauge must be
+applied WITHIN each subdomain to avoid low-frequency breakdown:
+
+```python
+# Each subdomain independently applies tree-cotree splitting
+# Corner edges are always cotree edges (globally connected)
+```
+
+### Numerical Scalability
+
+| Test | Result |
+|------|--------|
+| Fixed size, varying #subdomains | Iterations constant (3-5) |
+| Fixed #subdomains, varying size | Iterations constant (3-5) |
+| Unit-load-per-processor | >80% parallel efficiency up to 128 cores |
+| Nonlinear (Newton-FETI-DP) | Works with B-H curves |
+
+Validated on:
+- Eddy current: 1M DOFs, 128 subdomains, 4-8 iterations
+- SRM motor (nonlinear): 3.3M DOFs, 128 cores, 400s total
+- Phased arrays: up to 3.6 billion DOFs (300x300 array)
+
+### Limitations
+
+- Loses scalability when subdomains are electrically large (support resonant modes)
+- Solution: FETI-DP2L (two Lagrange multipliers) for high-frequency
+- For low-frequency EM (magnetostatic, eddy current): always scalable
+
+## NGSolve Domain Decomposition
+
+### BDDC (Balancing Domain Decomposition by Constraints)
+
+BDDC is NGSolve's primary domain decomposition preconditioner, closely
+related to FETI-DP (dual of each other):
+
+```python
+fes = HCurl(mesh, order=2)
+a = BilinearForm(fes)
+a += 1/mu * curl(u) * curl(v) * dx
+
+# BDDC preconditioner
+pre = Preconditioner(a, "bddc")
+a.Assemble()
+
+with TaskManager():
+    solvers.CG(mat=a.mat, rhs=f.vec, sol=gfu.vec,
+               pre=pre.mat, maxsteps=500, tol=1e-10)
+```
+
+### BDDC + AMG for Large Problems
+
+```python
+# AMG coarse solver for scalability beyond single-node
+pre = Preconditioner(a, "bddc", coarsetype="h1amg")
+```
+
+### Parallel Execution with MPI
+
+```python
+# Run with: mpirun -np 16 python script.py
+from ngsolve import *
+
+# Mesh partitioned automatically
+mesh = Mesh("large_problem.vol", comm=MPI_COMM_WORLD)
+
+# Same code, parallelized automatically with BDDC
+fes = HCurl(mesh, order=2)
+pre = Preconditioner(a, "bddc")
+```
+
+## Dual-Field Domain Decomposition (DFDD)
+
+For time-domain problems, DFDD computes both E and H fields:
+
+1. E on integer time steps, H on half-integer steps (leapfrog)
+2. Subdomains coupled via surface equivalence principle
+3. No global system to solve -> naturally parallel
+4. Each subdomain uses direct sparse solver (LU factored once)
+
+Key advantage: memory and factorization time scale as O(N/M) where
+M = number of subdomains (super-linear reduction for direct solvers).
+
+## Solver Selection for Large Problems
+
+| Problem Size | Recommendation |
+|-------------|----------------|
+| < 50K DOFs | Direct solver (PARDISO/UMFPACK) |
+| 50K - 500K DOFs | BDDC + CG/GMRes |
+| 500K - 5M DOFs | BDDC + AMG coarse + TaskManager |
+| > 5M DOFs | MPI parallel BDDC + METIS partitioning |
+| > 100M DOFs | FETI-DP (external, dedicated solver) |
+
+## Fast Frequency Sweep (AWE/SSP)
+
+For broadband analysis, avoid solving at each frequency independently.
+
+### Asymptotic Waveform Evaluation (AWE)
+
+```
+1. Solve at expansion point k0:    m0 = A^{-1}(k0) * y(k0)
+2. Compute moment vectors:         mn = A^{-1}(k0) * [y'(k0) - sum(A'*m_{n-i})]
+3. Taylor series:                  x(k) = sum(mn * (k-k0)^n)
+```
+
+Matrix A factored ONCE at k0, reused for all moments.
+Use Complex Frequency Hopping (CFH) for wide bands.
+
+### Solution Space Projection (SSP)
+
+More robust than AWE for wide frequency bands:
+- Compute solutions at a few sampled frequencies
+- Project onto reduced basis (Galerkin)
+- Solve small reduced system at each frequency
+- Adaptive binary search for sampling point selection
+
+## Key References
+
+- Farhat et al. (2001): FETI-DP for electromagnetics
+- Li & Jin (2007): FETI-DP for low-frequency and high-frequency EM
+- Yao et al. (2012): Nonlinear FETI-DP for SRM motors
+- Lou & Jin (2006): Dual-field domain decomposition
+- Slone et al. (2003): AWE for FEM frequency sweep
+"""
+
+
+NGSOLVE_MATERIAL_MODELING = """
+# Material Modeling for Magnetic FEM
+
+Based on: Takahashi Norio, "Magnetics FEM" (2013), "3D FEM" (2006).
+
+## B-H Curve Handling in FEM
+
+### Input Data Format
+B-H curve data: list of [H(A/m), B(T)] pairs, sorted by H ascending.
+
+```python
+# NGSolve BH curve via CoefficientFunction
+from ngsolve import *
+
+# Piecewise linear BH data (H, B pairs)
+BH_DATA = [(0, 0), (100, 0.5), (500, 1.0), (2000, 1.4),
+           (10000, 1.7), (50000, 2.0)]
+
+# Create nu(B) = H/B as function of |B|^2
+def create_reluctivity(bh_data):
+    H_vals, B_vals = zip(*bh_data)
+    # Build piecewise linear interpolation of nu(B^2)
+    # nu = H/B, with B^2 as independent variable for Newton
+    b2_vals = [b**2 for b in B_vals]
+    nu_vals = [h/b if b > 0 else H_vals[1]/B_vals[1]
+               for h, b in zip(H_vals, B_vals)]
+    # Use NGSolve's CF interpolation...
+    return nu_vals, b2_vals
+```
+
+### Key Pitfall: Saturation Extrapolation
+When B exceeds measured data range, the BH curve slope MUST approach mu_0:
+```
+For B > B_max_measured:
+    H = H_last + (B - B_last) / mu_0
+```
+Saturation magnetization Ms values (Takahashi Table 6.2):
+- Pure iron: Ms = 2.158 T
+- 3% Si steel (35A250): Ms = 2.03 T
+- Si formula: Ms = 2.158 - 0.048 * (Si content %)
+
+## Anisotropy Modeling
+
+### Method 1: Two B-H Curves (Simple but Inaccurate)
+Uses rolling direction (RD) and transverse direction (TD) curves independently:
+```
+Hx = nu_RD(Bx) * Bx   (RD direction)
+Hy = nu_TD(By) * By   (TD direction)
+```
+
+**PITFALL**: At high flux density, this gives physically wrong results -
+permeability in hard direction exceeds easy direction. Use only for
+rough estimates.
+
+### Method 2: Multiple B-H Curves (Accurate)
+Measure H(B, theta_B) and theta_H(B, theta_B) for multiple angles.
+Requires 2D magnetic property measurement device.
+
+Newton-Raphson needs 4 partial derivatives:
+dH/dB, dH/d(theta_B), d(theta_H)/dB, d(theta_H)/d(theta_B)
+
+**Key issue**: Coefficient matrix becomes NON-SYMMETRIC for anisotropy.
+Must use BiCGSTAB (not CG/ICCG) as linear solver.
+
+### Method 3: Fixed-Point Method (Recommended for Anisotropy)
+Fixed-Point iteration avoids non-symmetric matrices:
+```
+H = nu_FP * B + H_FP(B)   (linear part + residual)
+```
+
+**Advantages over Newton-Raphson for anisotropic materials**:
+1. Coefficient matrix is SYMMETRIC -> use ICCG (faster per iteration)
+2. No Jacobian computation needed
+3. No relaxation factor needed
+4. Convergence: ~5x more iterations but ~2x faster total (ICCG vs BiCGSTAB)
+
+Example: IPM motor with 35A300 steel, Fixed-Point 236 iterations (3915 ms)
+vs Newton-Raphson 42 iterations (8900 ms) -> FP is 2.3x faster total.
+
+**Implementation in NGSolve**:
+```python
+# Fixed-Point iteration for anisotropic materials
+nu_FP = 1 / (mu_0 * mu_r_avg)  # constant linear part
+H_FP = GridFunction(fes_H)      # residual field
+
+for iteration in range(max_iter):
+    # Solve linear system (symmetric!)
+    a_FP = BilinearForm(nu_FP * curl(u) * curl(v) * dx)
+    f_FP = LinearForm(J * v * dx + H_FP * curl(v) * dx)
+    # ...solve...
+    # Update H_FP from B-H curve residual
+    B_new = curl(gf_A)
+    H_exact = evaluate_anisotropic_BH(B_new)
+    H_FP.Set(H_exact - nu_FP * B_new)
+```
+
+## E&S Model (Enokizono & Soda)
+
+For rotating flux conditions (motors), the E&S model represents:
+```
+Hx = nu_xr * Bx + nu_xi * integral(Bx dt)
+Hy = nu_yr * By + nu_yi * integral(By dt)
+```
+where nu_xr, nu_xi, nu_yr, nu_yi are measured coefficients that
+vary with B_max, theta_B, and axis ratio alpha.
+
+This captures both anisotropy AND rotational hysteresis from measured data.
+
+## Key References
+
+- Takahashi (2013): "Magnetics FEM", Ch.6 (Asakura Publishing)
+- Enokizono & Soda (1990): E&S model for rotating flux
+- Muramatsu et al. (2015): Fixed-Point method for anisotropic IPM motor
+"""
+
+NGSOLVE_IRON_LOSS = """
+# Iron Loss Estimation in FEM
+
+Based on: Takahashi Norio, "Magnetics FEM" (2013), Ch.6.4.
+
+## Iron Loss Decomposition (Classical)
+
+Total iron loss = Hysteresis loss + Eddy current loss + Anomalous loss
+
+```
+W_total = W_h + W_e + W_a
+
+W_h = k_h * f * B_max^alpha   [W/kg]  (Steinmetz, alpha ~ 1.6-2.0)
+W_e = k_e * f^2 * B_max^2     [W/kg]  (classical eddy current)
+W_a = k_a * f^1.5 * B_max^1.5 [W/kg]  (anomalous/excess loss)
+```
+
+### Classical Eddy Current Loss (from Maxwell's equations)
+For sinusoidal flux in a laminated steel sheet of thickness d:
+```
+W_e = (pi * d * B_max * f)^2 / (6 * rho * gamma)  [W/m^3]
+    = sigma * d^2 * (dB/dt)^2 / 12                  [W/m^3, instantaneous]
+```
+where rho = resistivity, gamma = density, sigma = conductivity.
+
+### Anomalous Eddy Current Loss
+Domain wall motion creates localized eddy currents beyond classical prediction.
+For non-oriented steel at 50 Hz, anomalous loss can be 40-60% of total eddy
+current loss. Classical eddy current alone underestimates significantly.
+
+## FEM-Based Iron Loss Computation
+
+### Post-Processing Method (Standard)
+```python
+# After time-stepping FEM solve:
+# 1. Extract B(t) waveform at each element
+# 2. Compute FFT -> B_n for each harmonic n
+# 3. Apply loss formula per harmonic
+
+import numpy as np
+
+def compute_iron_loss_element(B_waveform, dt, bh_coeffs):
+    \"\"\"Compute iron loss for one element from B(t) waveform.\"\"\"
+    N = len(B_waveform)
+    f0 = 1.0 / (N * dt)
+
+    # FFT of |B| waveform
+    B_fft = np.fft.rfft(B_waveform)
+    B_n = 2.0 * np.abs(B_fft) / N  # harmonic amplitudes
+
+    k_h, alpha, k_e, k_a = bh_coeffs
+    W = 0.0
+    for n in range(1, len(B_n)):
+        fn = n * f0
+        Bn = B_n[n]
+        W += k_h * fn * Bn**alpha      # hysteresis
+        W += k_e * fn**2 * Bn**2        # eddy current
+        W += k_a * fn**1.5 * Bn**1.5    # anomalous
+    return W  # W/kg
+```
+
+### Locus-Based Method (for Rotating Flux)
+For rotating machines, B traces an elliptical locus, not 1D alternation.
+Decompose into orthogonal components:
+```
+W_total = W_alternating(B_major) + W_alternating(B_minor) * k_rot
+```
+where k_rot accounts for rotational hysteresis loss.
+
+### Direct Integration Method (Most Accurate)
+```
+W_h = integral(H * dB)  per cycle   [J/m^3, from hysteresis loop area]
+W_e = integral(sigma * d^2/12 * (dB/dt)^2 * dt)  per cycle
+```
+
+## Electrical Steel Classification (JIS)
+
+### Non-Oriented (Motor Cores)
+Format: [thickness*100]A[loss*100]
+- 35A250: 0.35mm, W_15/50 <= 2.50 W/kg, B50 = 1.62 T
+- 35A300: 0.35mm, W_15/50 <= 3.00 W/kg
+- 50A350: 0.50mm, W_15/50 <= 3.50 W/kg
+
+### Grain-Oriented (Transformer Cores)
+Format: [thickness*100]P/G[loss*100]
+- 35P135: 0.35mm high-oriented, W_17/50 <= 1.35 W/kg, B8 = 1.88 T
+- 30G130: 0.30mm standard, W_17/50 <= 1.30 W/kg
+
+### High-Frequency Steel
+- 6.5% Si steel: 0.10mm, for motors > 400 Hz
+- Ms = 1.8 T, conductivity = 0.122e7 S/m
+
+## Stress Effects on Magnetic Properties
+
+### Cutting Stress
+Punching/laser cutting creates residual stress zone (~1-3 mm from edge).
+Effect: increased coercivity, decreased permeability near cut edges.
+For narrow teeth (< 5mm), degradation can be 20-40%.
+
+**FEM modeling**: Apply degraded BH curve to elements near cut edges.
+
+### Compressive Stress
+External compressive stress significantly degrades BH curve.
+At 10 MPa compression: permeability drops ~30% for non-oriented steel.
+At 40 MPa: permeability drops ~60%.
+
+Stress-dependent BH modeling:
+```
+B(H, sigma) = B_0(H) * k_sigma(sigma)
+```
+where k_sigma is stress degradation factor (measured).
+
+## PWM Inverter Excitation
+
+PWM carrier frequency harmonics cause additional iron loss:
+- Carrier harmonics (e.g., 5 kHz): small B amplitude but high frequency
+- Additional loss: 10-30% above sinusoidal excitation
+- Must include harmonics up to 2x carrier frequency in loss calculation
+
+## Key References
+
+- Takahashi (2013): "Magnetics FEM", Ch.6.4 (comprehensive iron loss)
+- Bertotti (1988): Three-component loss model
+- Steinmetz (1892): Original hysteresis loss formula
+"""
+
+NGSOLVE_PRACTICAL_TECHNIQUES = """
+# Practical FEM Techniques for Electrical Machines
+
+Based on: Takahashi Norio, "Magnetics FEM" (2013) Ch.7,
+          "3D FEM" (2006) Ch.6.
+
+## Voltage Source Coupling (Field-Circuit)
+
+When coil current is unknown (voltage-driven), couple FEM with circuit:
+
+### Basic Equation
+```
+d(phi)/dt + R*I + L_end*dI/dt = V_source
+```
+where phi = flux linkage from FEM, R = coil resistance,
+L_end = end-winding inductance, V_source = applied voltage.
+
+### NGSolve Implementation
+```python
+# Coupled field-circuit in NGSolve
+fes_A = HCurl(mesh, order=2, complex=True)
+# Circuit variable: current as additional unknown
+fes_I = NumberSpace(mesh)
+fes = fes_A * fes_I
+
+(u, dI), (v, dv) = fes.TnT()
+
+# FEM part: curl-curl
+a = BilinearForm(fes)
+a += nu * curl(u) * curl(v) * dx
+a += sigma * u * v * dx          # eddy current term
+
+# Coupling: current source term
+n_turns = 100
+S_coil = coil_area
+J0 = n_turns / S_coil
+a += -J0 * dI * v * dx_coil      # current -> field
+a += J0 * u * dv * dx_coil       # field -> circuit (flux linkage)
+
+# Circuit equation
+a += (R + 1j*omega*L_end) * dI * dv
+f = LinearForm(fes)
+f += V_source * dv
+```
+
+### Current Direction Vector T
+For 3D coils, define current direction via current vector potential T:
+```
+J0 = curl(T),  integral(T . dl) = I0  (along coil path)
+```
+This ensures div(J0) = 0 automatically (required for edge elements).
+
+## Electromagnetic Force and Torque
+
+### Method 1: Maxwell Stress Tensor (MST)
+```
+F_i = oint_S T_ij * n_j dS
+
+T_ij = (1/mu_0) * (B_i*B_j - 0.5*delta_ij*|B|^2)
+```
+Integration surface S must be entirely in air.
+
+```python
+# Maxwell stress tensor in NGSolve
+B = curl(gf_A)
+Bx, By, Bz = B[0], B[1], B[2]
+B2 = Bx**2 + By**2 + Bz**2
+
+# Force in x-direction
+Txx = (1/mu_0) * (Bx*Bx - 0.5*B2)
+Txy = (1/mu_0) * (Bx*By)
+
+Fx = Integrate(Txx*n[0] + Txy*n[1], mesh, BND,
+               definedon=mesh.Boundaries("air_gap"))
+```
+
+**PITFALL**: Integration surface must NOT cross material boundaries.
+Place surface in air gap for best accuracy.
+
+### Method 2: Virtual Work Principle
+```
+F = -dW/dx  (W = magnetic energy or coenergy)
+
+Torque = -dW/d(theta)
+```
+Compute by two solutions with small displacement:
+```
+F_x = -(W(x+dx) - W(x-dx)) / (2*dx)
+```
+
+For coenergy (more accurate with nonlinear materials):
+```
+W_co = integral(B * dH)  (coenergy, integrate B with respect to H)
+F = +dW_co/dx            (note: positive sign for coenergy)
+```
+
+### Method 3: Nodal Force (Eggshell + SetDeformation)
+Uses Coulomb virtual work: F_i = -dW/dx_i with frozen A (no re-solve).
+
+**MST vs Nodal Force -- accuracy is equivalent for linear problems**
+(Henrotte & Hameyer 2004). Both extract force from the same FEM solution,
+so the accuracy bottleneck is the field quality, not the force method.
+Nodal force advantages are practical, not accuracy:
+- 3D complex geometry: no need to define a clean integration surface in air
+- Structural coupling: per-node forces -> direct FEM structural load
+- Torque: virtual rotation, no lever-arm calculation
+- Nonlinear: coenergy formulation is rigorous for B-H curves
+
+**Key idea**: Surround the body with a thin "eggshell" air layer.
+Create a blending function (1 inside body, 0 outside eggshell).
+Use mesh.SetDeformation() + central difference for the energy derivative.
+
+**CRITICAL**: Use `mesh.Curve(3)` for curved geometry. Without curving,
+polygon approximation of circles loses ~2% area -> ~9% force error.
+
+```python
+# --- Eggshell nodal force method (verified implementation) ---
+# Geometry: create eggshell ring around iron body via OCC boolean ops
+# iron_shape = wp.MoveTo(d, 0).Circle(R_cyl).Face()
+# iron_shape.name = "iron"
+# egg_outer = wp.MoveTo(d, 0).Circle(R_cyl + t_egg).Face()
+# eggshell = egg_outer - iron_shape
+# eggshell.name = "eggshell"
+# ... then Glue([wire, iron, eggshell, air])
+# mesh.Curve(3)  # ESSENTIAL for curved boundaries
+
+# After solving A-formulation (gf_A = solution):
+# 1. Blending function: 1 on iron, 0 outside eggshell
+fes_blend = H1(mesh, order=1)
+gf_blend = GridFunction(fes_blend)
+gf_blend.Set(1.0, definedon=mesh.Materials("iron"))
+
+# 2. Virtual displacement V = (blend * delta, 0)
+fes_def = VectorH1(mesh, order=1)
+gf_def = GridFunction(fes_def)
+delta = 1e-7  # perturbation [m]
+
+nu_cf = 1.0 / mu_cf  # reluctivity
+energy_density = 0.5 * nu_cf * InnerProduct(grad(gf_A), grad(gf_A))
+
+# 3. Central difference
+gf_def.components[0].vec.data = delta * gf_blend.vec
+gf_def.components[1].vec[:] = 0.0
+mesh.SetDeformation(gf_def)
+W_plus = Integrate(energy_density, mesh, order=2*order+4)
+mesh.UnsetDeformation()
+
+gf_def.components[0].vec.data = -delta * gf_blend.vec
+mesh.SetDeformation(gf_def)
+W_minus = Integrate(energy_density, mesh, order=2*order+4)
+mesh.UnsetDeformation()
+
+Fx = -(W_plus - W_minus) / (2 * delta)
+# For torque: use tangential virtual displacement instead
+```
+
+**Verified**: Wire + iron cylinder benchmark (2D, linear, mu_r=1000):
+- MST and nodal force agree within 0.001% (both use same FEM field)
+- Both match analytical to 0.01% (with mesh.Curve(3))
+- Without mesh.Curve(): ~9% systematic error for BOTH methods equally
+- Accuracy difference between methods: none (linear problem)
+See `Radia/examples/nodal_force/demo_nodal_force_2d.py`.
+
+**When to choose which method:**
+| Situation | Recommended | Reason |
+|-----------|-------------|--------|
+| Quick global force check | MST | Simple, one-line Integrate |
+| 3D iron body (complex shape) | Nodal force | No integration surface needed |
+| Structural FEM coupling | Nodal force | Per-node force distribution |
+| Torque in rotating machines | Nodal force | Virtual rotation is natural |
+| Nonlinear B-H material | Nodal force | Coenergy formulation rigorous |
+| Linear, simple geometry | Either | Equivalent accuracy |
+
+## Rotation Handling for Motors
+
+### Method 1: Remeshing (simple but slow)
+Regenerate air gap mesh at each angular position.
+
+### Method 2: Sliding Surface with Unknown Equipotential
+```python
+# Floating-point nodes on stator-rotor interface
+# Connect via constraint equations
+# A_stator(theta) = A_rotor(theta + theta_mech)
+```
+
+### Method 3: Locked-Step (Moving Band)
+Rotate mesh by one element width per time step.
+Requires air gap mesh with uniform angular divisions.
+
+## Gap Elements (Thin Air Gap Modeling)
+
+For thin gaps (gap << surrounding dimensions), use line elements:
+```
+W_gap = (1/2) * nu_0 * (A1 - A2)^2 / L_gap * D_gap * L_element
+```
+No area needed - attach to existing mesh without remeshing.
+
+**Advantages**:
+1. Add/remove gaps without mesh modification
+2. Easy gap length parametric studies
+3. More accurate than flat triangles for very thin gaps
+
+## Magneto-Thermal Coupled Analysis
+
+### Coupling Strategy
+```
+1. Solve magnetic field -> compute losses (W_e + W_h)
+2. Use losses as heat source -> solve thermal
+3. Update material properties at new temperature
+4. Repeat until temperature converges
+```
+
+### Temperature-Dependent Properties
+- Conductivity: sigma(T) = sigma_20 / (1 + alpha*(T - 20))
+  (alpha = 0.004 for copper, 0.0039 for aluminum)
+- Permanent magnet: Br(T) = Br_20 * (1 + alpha_Br*(T - 20))
+  (alpha_Br ~ -0.001/K for NdFeB, -0.0004/K for ferrite)
+- BH curve: shifts toward lower B at higher temperature
+
+### Thermal FEM in NGSolve
+```python
+# Thermal analysis
+fes_T = H1(mesh, order=2, dirichlet="outer")
+T, s = fes_T.TnT()
+
+# Heat conduction
+k_thermal = mesh.MaterialCF({"iron": 50, "copper": 400,
+                              "air": 0.026})
+a_th = BilinearForm(k_thermal * grad(T) * grad(s) * dx)
+
+# Convection BC: q = h*(T - T_ambient)
+h_conv = 10  # W/(m^2*K)
+a_th += h_conv * T * s * ds("surface")
+
+# Heat source from EM solve
+f_th = LinearForm(Q_density * s * dx)
+f_th += h_conv * T_ambient * s * ds("surface")
+```
+
+## Inductance and EMF Computation
+
+### Flux Linkage from Vector Potential
+```
+phi = (n_turns / S_coil) * integral(A . n_coil dV)
+     = (n_turns / S_coil) * integral(A_z dS)   (2D)
+```
+
+### Inductance
+```
+L = phi / I  = (n^2 / S^2) * integral(A . J0 dV) / I^2
+  = 2*W_magnetic / I^2  (from energy)
+```
+
+### Back-EMF
+```
+EMF = -d(phi)/dt
+    = -(n/S) * integral(dA/dt . n_coil dV)
+```
+In time-stepping: use backward difference (A^n - A^{n-1})/dt.
+
+## Key References
+
+- Takahashi (2013): "Magnetics FEM", Ch.7 (Asakura Publishing)
+- Takahashi (2006): "3D FEM", Ch.6 (IEEJ)
+- Nakata & Takahashi (1995): "FEM for EE", Ch.6-7 (Morikita Publishing)
+"""
+
+
 def get_ngsolve_documentation(topic: str = "all") -> str:
     """Return NGSolve usage documentation by topic."""
     topics = {
@@ -2908,6 +3859,12 @@ def get_ngsolve_documentation(topic: str = "all") -> str:
         "adaptive": NGSOLVE_ADAPTIVE,
         "darwin": NGSOLVE_DARWIN_SIBC,
         "esim": NGSOLVE_ESIM,
+        "treecotree": NGSOLVE_TREE_COTREE,
+        "pml": NGSOLVE_PML,
+        "decomposition": NGSOLVE_DOMAIN_DECOMP,
+        "material": NGSOLVE_MATERIAL_MODELING,
+        "ironloss": NGSOLVE_IRON_LOSS,
+        "practical": NGSOLVE_PRACTICAL_TECHNIQUES,
     }
 
     topic = topic.lower().strip()
