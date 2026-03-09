@@ -2439,6 +2439,458 @@ eta_total = eta_inner + eta_kelvin
 """
 
 
+NGSOLVE_DARWIN_SIBC = """
+# Darwin Approximation and Surface Impedance Method in FEM
+
+Reference: A. Kameari, H. Kaimori (SSIL), S. Hiruma (Hokkaido Univ.),
+H. Nagamine (Gifu Univ.), IEEJ SA-26-002 / RM-26-002 (2026).
+
+## Darwin Approximation
+
+Maxwell equations without electromagnetic radiation (displacement current dD/dt removed).
+
+**Full Maxwell** A-Phi energy functional:
+```
+F_Maxwell = (1/2)*integral[ (1/mu)*|curl(A)|^2 + sigma*|s*A + s*grad(phi)|^2
+            + (1/c^2)*|s*A|^2 ] dV
+```
+
+**Darwin approximation** removes the `(1/c^2)*|s*A|^2` term:
+```
+F_Darwin = (1/2)*integral[ (1/mu)*|curl(A)|^2 + sigma*|s*A + s*grad(phi)|^2 ] dV
+```
+
+**Key properties**:
+- Coulomb gauge (div(A) = 0) is imposed **implicitly** by the Darwin functional
+- Electromagnetic radiation is completely removed
+- Condition number is very poor (Hiruma, IEEE Trans. Magn., 2024)
+- Valid up to frequencies where radiation/resonance effects are negligible
+
+### NGSolve Implementation
+
+```python
+from ngsolve import *
+from netgen.occ import *
+
+# A-Phi formulation for Darwin / Full Maxwell eddy current
+fesA = HCurl(mesh, order=2, type1=True, nograds=True,
+             dirichlet="outer", complex=True)
+fesPhi = H1(mesh, order=2, definedon="conductor",
+            dirichlet="...", complex=True)
+fes = fesA * fesPhi
+(A, phi), (N, psi) = fes.TnT()
+
+s = 2j * pi * freq
+mu0 = 4e-7 * pi
+
+# Bilinear form (common to Darwin and Full Maxwell)
+a = BilinearForm(fes)
+a += 1/Mu * curl(A) * curl(N) * dx                                    # curl-curl
+a += Sigma * s * (A + grad(phi)) * (N + grad(psi)) * dx("conductor")  # eddy current
+
+# For Full Maxwell, add displacement current term:
+# a += (1/c**2) * s**2 * A * N * dx   # (omit for Darwin)
+```
+
+## ICCG Convergence: Two-Stage Behavior
+
+Darwin approximation solved by ICCG exhibits **two distinct convergence stages**:
+
+1. **Fast initial convergence** to the Full Maxwell solution (residual drops rapidly)
+2. **Very slow subsequent convergence** toward the Coulomb gauge solution
+
+**Practical implication**: The Full Maxwell solution (stage 1) is already accurate
+for low frequencies. The slow stage 2 convergence to Coulomb gauge is unnecessary
+for engineering accuracy. This explains why Darwin ICCG appears to "converge" quickly
+but the residual then stalls -- it is the Coulomb gauge convergence that is slow.
+
+**Frequency dependence**:
+- Higher frequency -> initial minimum is higher (further from Full Maxwell)
+- Higher frequency -> oscillation period in stage 2 decreases
+  (Coulomb gauge convergence actually slightly improves)
+- At very high frequencies, the Darwin ICCG may fail to converge at all
+
+**CAUTION**: Adding a gauge condition (e.g., penalty on div(A)) and using a direct
+solver can make the system **unstable** (Hiptmair et al., IEEE Access, 2022).
+Use ICCG without explicit gauge for robustness.
+
+## Surface Impedance Method (SIBC in FEM)
+
+Replaces volumetric conductor meshing with a surface boundary condition.
+Avoids the need to resolve skin depth in the mesh.
+
+### When to Use
+
+| Approach | Frequency Range | Limitation |
+|----------|----------------|------------|
+| **Bulk conductor mesh** | DC - ~10^5 Hz | Mesh cannot resolve skin depth above ~10^5 Hz; ICCG diverges |
+| **Surface impedance BC** | ~10^2 Hz and above | Invalid below ~10^2 Hz (skin depth > conductor size) |
+| **Overlap region** | 10^2 - 10^5 Hz | Both methods valid; choose based on accuracy needs |
+
+**Key advantage**: ICCG converges normally with SIBC even at high frequencies,
+whereas bulk conductor analysis fails (mesh under-resolution + ill-conditioning).
+
+### Surface Impedance Formulation
+
+The conductor surface is replaced by an impedance boundary condition:
+```
+n x H = Zs * (n x (n x E))   on conductor surface
+```
+
+where `Zs` is the surface impedance:
+```python
+import numpy as np
+mu0 = 4e-7 * np.pi
+omega = 2 * np.pi * freq
+sigma = 5.8e7       # conductivity [S/m]
+mu_r = 1.0           # relative permeability
+
+delta = np.sqrt(2 / (omega * mu0 * mu_r * sigma))  # skin depth
+Zs = (1 + 1j) / (sigma * delta)                     # surface impedance
+```
+
+### NGSolve Implementation (SIBC as Robin BC)
+
+```python
+# Instead of volumetric conductor elements, apply surface BC:
+# The conductor surface replaces the conductor volume
+
+fesA = HCurl(mesh, order=2, type1=True, nograds=True,
+             dirichlet="outer", complex=True)
+
+a = BilinearForm(fesA)
+a += 1/mu0 * curl(A) * curl(N) * dx                           # curl-curl in air
+a += (1/Zs) * A.Trace() * N.Trace() * ds("conductor_surface") # SIBC Robin BC
+
+# RHS: source current (e.g., coil)
+f = LinearForm(fesA)
+f += J_source * N * dx("coil")
+```
+
+**Notes**:
+- The conductor volume is excluded from the mesh (or meshed coarsely as air)
+- SIBC appears as a Robin-type boundary condition on the conductor surface
+- Zs is complex and frequency-dependent
+- For thin conductors (thickness t ~ delta), use slab impedance:
+  `Zs_slab = Zs * coth(gamma * t)` where `gamma = (1+j)/delta`
+
+## Extended Darwin Approximation
+
+For higher frequencies where standard Darwin deviates from Full Maxwell:
+
+**Method**: Add auxiliary variable chi to correct the scalar potential Phi.
+The corrected Phi distribution matches Full Maxwell exactly.
+
+```
+F_extended = F_Darwin + correction_term(chi)
+```
+
+**Properties**:
+- Phi distribution identical to Full Maxwell solution
+- E computed as E = -s*(A + grad(Phi)) (same as standard)
+- ICCG convergence identical to Full Maxwell (no Coulomb gauge issue)
+- Valid up to ~10^9 Hz (no resonance/radiation in Darwin)
+- Above 10^9 Hz, deviates from Full Maxwell (electromagnetic radiation dominates)
+
+## Boundary Condition Dependence in Darwin
+
+**CRITICAL**: Darwin approximation treats longitudinal and transverse E-fields
+differently, leading to BC-dependent results.
+
+### Two Types of Uniform E-field Excitation
+
+| BC Type | Physical Meaning | Darwin Behavior |
+|---------|-----------------|-----------------|
+| **Voltage BC** (Phi on faces) | Charge-origin E-field (longitudinal) | Captures correctly |
+| **Current BC** (Az on sides) | Current-origin E-field (transverse) | Captures correctly |
+
+A uniform E-field (harmonic field) is **both** longitudinal AND transverse.
+Darwin approximation separates these, so the two BC types give **different results**.
+This is physically correct behavior of the Darwin model, not a bug.
+
+**At high frequencies** (>10^9 Hz with extended Darwin): BC dependence becomes
+visible as the model diverges from Full Maxwell, which does not have this separation.
+
+## Practical Recommendations
+
+1. **Low frequency (DC - 10^5 Hz)**: Use standard A-Phi with bulk conductor mesh.
+   Darwin ICCG converges fast enough (stage 1 = Full Maxwell accuracy).
+
+2. **Medium frequency (10^2 - 10^5 Hz)**: Either bulk mesh or SIBC.
+   SIBC preferred if skin depth is much smaller than conductor dimensions.
+
+3. **High frequency (10^5 Hz+)**: Use SIBC (bulk mesh fails).
+   Standard Darwin + SIBC with ICCG converges normally.
+
+4. **Very high frequency (10^5 - 10^9 Hz)**: Extended Darwin + SIBC.
+   Avoids Coulomb gauge convergence issues entirely.
+
+5. **Above 10^9 Hz**: Darwin approximation invalid.
+   Use Full Maxwell (radiation/resonance effects cannot be ignored).
+
+## Nonlinear Surface Impedance (ESIM)
+
+For nonlinear magnetic conductors (steel, iron, ferrite), the linear SIBC
+formula Zs = (1+j)/(sigma*delta) is inaccurate because mu_r depends on H.
+
+Radia provides ESIM (Effective Surface Impedance Method) which computes
+H-dependent Zs(H, omega) from a 1D cell problem. This Zs can be used as
+a Robin BC in **any** NGSolve formulation (A-Phi, T-Omega, Darwin, etc.).
+
+See topic `"esim"` for full ESIM API, cell problem details, and NGSolve
+integration code examples.
+
+## IEC/SDT Method for Convergence
+
+IEC (Iterative Edge Correction) / SDT (Source Distribution Technique) can
+improve ICCG convergence for Darwin systems. See Kaimori et al. (2024) for
+the low-frequency stabilized formulation of Darwin model.
+
+## References
+
+1. H. Kaimori, T. Mifune, A. Kameari, S. Wakao: "Low-frequency stabilized
+   formulations of Darwin model in time-domain electromagnetic FEM",
+   IEEE Trans. Magn., Vol.60, No.3 (2024)
+2. R. Hiptmair, F. Kraemer, J. Ostrowski: "A robust Maxwell formulation
+   for all frequencies", IEEE Access, Vol.10 (2022)
+3. S. Hiruma, T. Mifune, T. Matsuo: "Estimation of condition number of
+   quasi-static Darwin model", IEEE Trans. Magn., Vol.60, No.12 (2024)
+4. K. Hollaus, O. Biro: "Derivation of a complex permeability from
+   the Preisach model", IEEE Trans. Magn. (2002)
+"""
+
+
+NGSOLVE_ESIM = """
+# ESIM: Nonlinear Surface Impedance for FEM
+
+ESIM (Effective Surface Impedance Method) extends SIBC to **nonlinear magnetic
+conductors** (B-H curve dependent mu). The 1D cell problem computes Zs(H, omega)
+which replaces the linear Zs = (1+j)/(sigma*delta) in the Robin BC.
+
+ESIM is formulation-independent: it works with A-Phi, T-Omega, Darwin,
+reduced vector potential, or any other FEM formulation that supports
+surface impedance as a Robin BC.
+
+## Physics: 1D Cell Problem
+
+The cell problem solves H penetration into a semi-infinite conductor:
+
+```
+rho * d^2H/dz^2 + j*omega*mu(|H|)*H = 0    z in [0, inf)
+H(0) = H0    (surface tangential field)
+H(inf) = 0   (decay into bulk)
+```
+
+- Linear mu: analytical Zs = (1+j)/(sigma*delta)
+- Nonlinear mu(H): ESIM solves numerically, returns Zs(H0)
+- Complex mu = mu' - j*mu": includes magnetic losses (hysteresis, grain eddy current)
+
+## Radia ESIM API
+
+### ESI Table Generation
+
+```python
+from radia import generate_esi_table_from_bh_curve, ESITable
+
+# BH curve for steel (H in A/m, B in Tesla)
+bh_curve = [[0, 0], [100, 0.5], [500, 1.2], [2000, 1.5], [50000, 2.0]]
+sigma = 5e6        # conductivity [S/m]
+freq = 10000       # frequency [Hz]
+
+# Generate ESI table: Zs(H0) for H0 = 1..100000 A/m (log-spaced)
+esi_table = generate_esi_table_from_bh_curve(bh_curve, sigma, freq, n_points=50)
+
+# Query impedance at specific surface H
+Zs = esi_table.get_impedance(H0=1000)  # complex Zs [Ohm]
+P, Q = esi_table.get_power_loss(H0=1000)  # W/m^2, var/m^2
+
+# Save/load for reuse across simulations
+esi_table.save('steel_10kHz.esi')
+esi_table = ESITable.load('steel_10kHz.esi')
+```
+
+### Finite Slab (Thin Conductors)
+
+For conductors where skin depth ~ thickness (transition region):
+
+```python
+from radia.esim_cell_problem import ESIMFiniteSlabSolver
+
+solver = ESIMFiniteSlabSolver(
+    half_thickness=0.005,  # 5mm half-thickness [m]
+    bh_curve=bh_curve, sigma=sigma, frequency=freq
+)
+result = solver.solve(H0=1000)
+Zs = result['Z']        # includes coth(gamma*t) correction
+rac_rdc = result['R_ac_over_R_dc']
+H_profile = result['H_profile']  # H(z) depth distribution
+```
+
+### Complex Permeability
+
+For materials with magnetic losses (hysteresis, grain-boundary eddy currents):
+
+```python
+from radia.esim_cell_problem import ESIMCellProblemSolver
+
+# Constant complex mu
+solver = ESIMCellProblemSolver(
+    complex_mu=(500, 50),  # mu'_r=500, mu"_r=50
+    sigma=5e6, frequency=10000
+)
+
+# H-dependent complex mu
+complex_mu_data = [
+    [100, 800, 30],   # [H(A/m), mu'_r, mu"_r]
+    [1000, 500, 50],
+    [5000, 200, 20],
+]
+solver = ESIMCellProblemSolver(
+    complex_mu=complex_mu_data,
+    sigma=5e6, frequency=10000
+)
+```
+
+## NGSolve Integration: Nonlinear Robin BC
+
+### Applicable Formulations
+
+ESIM provides Zs(H) as a surface impedance. In NGSolve, this appears as a
+Robin-type boundary condition on the conductor surface:
+
+| Formulation | Robin BC Term | Unknown |
+|-------------|--------------|---------|
+| **A-Phi** (eddy current) | `(1/Zs) * A.Trace() * N.Trace() * ds` | A in HCurl |
+| **T-Omega** | `Zs * curl(T).Trace() * curl(W).Trace() * ds` | T in HCurl |
+| **Darwin A-Phi** | Same as A-Phi (no displacement current) | A in HCurl |
+| **Reduced A** (magnetostatic+AC) | `(1/Zs) * A.Trace() * N.Trace() * ds` | A_r in HCurl |
+
+### A-Phi Implementation with ESIM
+
+```python
+from ngsolve import *
+from radia import generate_esi_table_from_bh_curve
+
+# 1. Pre-compute ESI table
+bh_curve = [[0, 0], [100, 0.5], [500, 1.2], [2000, 1.5], [50000, 2.0]]
+esi_table = generate_esi_table_from_bh_curve(bh_curve, sigma=5e6, frequency=10e3)
+
+# 2. FEM setup (air mesh only; conductor excluded, surface is boundary)
+fesA = HCurl(mesh, order=2, nograds=True, dirichlet="outer", complex=True)
+A, N = fesA.TnT()
+mu0 = 4e-7 * pi
+s = 2j * pi * freq
+
+# 3. Per-surface-element Zs storage
+fes_bnd = SurfaceL2(mesh, order=0, definedon=mesh.Boundaries("workpiece"))
+Zs_real_gf = GridFunction(fes_bnd)
+Zs_imag_gf = GridFunction(fes_bnd)
+Zs_init = esi_table.get_impedance(100)  # initial guess
+Zs_real_gf.Set(Zs_init.real)
+Zs_imag_gf.Set(Zs_init.imag)
+
+# 4. Picard iteration (fixed-point on Zs)
+gfA = GridFunction(fesA)
+
+for iteration in range(50):
+    Zs_cf = Zs_real_gf + 1j * Zs_imag_gf
+
+    a = BilinearForm(fesA)
+    a += 1/mu0 * curl(A) * curl(N) * dx                        # curl-curl in air
+    a += (1/Zs_cf) * A.Trace() * N.Trace() * ds("workpiece")   # ESIM Robin BC
+    a.Assemble()
+
+    f = LinearForm(fesA)
+    f += J_source * N * dx("coil")
+    f.Assemble()
+
+    gfA.vec.data = a.mat.Inverse(fesA.FreeDofs()) * f.vec
+
+    # Update Zs from surface |H_t|
+    H_surf = 1/mu0 * curl(gfA)
+    max_change = 0
+    for el in mesh.Elements(BND):
+        if mesh.GetBCName(el.index) != "workpiece":
+            continue
+        mip = mesh(*el_centroid(el))
+        H_vec = H_surf(mip)
+        H_mag = abs(sqrt(sum(h**2 for h in H_vec)))
+        Zs_new = esi_table.get_impedance(max(H_mag, 1.0))
+
+        # Under-relaxation for stability
+        alpha = 0.3
+        Zs_old_r = Zs_real_gf.vec[el.nr]
+        Zs_old_i = Zs_imag_gf.vec[el.nr]
+        Zs_real_gf.vec[el.nr] = alpha * Zs_new.real + (1-alpha) * Zs_old_r
+        Zs_imag_gf.vec[el.nr] = alpha * Zs_new.imag + (1-alpha) * Zs_old_i
+        max_change = max(max_change, abs(Zs_new - complex(Zs_old_r, Zs_old_i)))
+
+    if max_change < 1e-6 * abs(Zs_init):
+        print(f"ESIM converged at iteration {iteration}")
+        break
+
+# 5. Post-processing: Joule loss from ESIM
+total_loss = 0
+for el in mesh.Elements(BND):
+    if mesh.GetBCName(el.index) != "workpiece":
+        continue
+    mip = mesh(*el_centroid(el))
+    H_mag = abs(sqrt(sum(h**2 for h in H_surf(mip))))
+    P_loss, _ = esi_table.get_power_loss(max(H_mag, 1.0))
+    total_loss += P_loss * el_area(el)  # integrate P' over surface
+```
+
+### Induction Heating Workflow with ESIM
+
+```
+1. Gmsh/Cubit mesh (air + coil only, no conductor volume)
+2. Generate ESI table from workpiece B-H curve + sigma + freq
+3. NGSolve A-Phi solve with ESIM Robin BC (Picard iteration)
+4. Post-process: Joule loss from ESI table P'(H) * surface_area
+5. Optional: thermal analysis with Joule loss as surface heat source
+```
+
+Compared to bulk conductor meshing:
+- No boundary layer mesh for skin depth resolution
+- No frequency-dependent re-meshing
+- Handles nonlinear mu(H) automatically
+- Joule loss directly from ESI table (no J field needed)
+
+## ESIM vs Linear SIBC
+
+| Property | Linear SIBC | ESIM |
+|----------|-------------|------|
+| Material | Constant mu_r | B-H curve (nonlinear) |
+| Zs formula | `(1+j)/(sigma*delta)` | Numerical 1D cell problem |
+| FEM solver | Single linear solve | Picard iteration |
+| Complex mu | No | Yes (mu' - j*mu" for losses) |
+| Application | Cu, Al conductors | Steel, iron, ferrite |
+| Accuracy at high H | Good (linear) | Captures saturation |
+
+## When to Use ESIM vs Bulk Mesh
+
+| Regime | Method | When |
+|--------|--------|------|
+| delta >> conductor size | Bulk mesh + nonlinear Newton | Low freq, thin conductor |
+| delta ~ element size | Fine boundary layer mesh | Moderate freq, needs J profile |
+| delta << element size | **ESIM + Robin BC** | High freq, thick conductor |
+
+**Rule of thumb**: If you need > 3 boundary layers to resolve skin depth
+and the material is nonlinear, use ESIM.
+
+## Key Radia Files
+
+| File | Class/Function | Purpose |
+|------|---------------|---------|
+| `esim_cell_problem.py` | `ESIMCellProblemSolver` | Semi-infinite 1D solver |
+| `esim_cell_problem.py` | `ESIMFiniteSlabSolver` | Finite thickness solver |
+| `esim_cell_problem.py` | `ESITable` | Zs(H) lookup with interpolation |
+| `esim_cell_problem.py` | `generate_esi_table_from_bh_curve()` | Main entry point |
+| `esim_coupled_solver.py` | `ESIMCoupledSolver` | PEEC + ESIM coupled solver |
+| `esim_workpiece.py` | `ESIMWorkpiece` | 3D workpiece with ESI tables |
+"""
+
+
 def get_ngsolve_documentation(topic: str = "all") -> str:
     """Return NGSolve usage documentation by topic."""
     topics = {
@@ -2454,6 +2906,8 @@ def get_ngsolve_documentation(topic: str = "all") -> str:
         "linalg": NGSOLVE_LINALG,
         "formulations": NGSOLVE_EM_FORMULATIONS,
         "adaptive": NGSOLVE_ADAPTIVE,
+        "darwin": NGSOLVE_DARWIN_SIBC,
+        "esim": NGSOLVE_ESIM,
     }
 
     topic = topic.lower().strip()

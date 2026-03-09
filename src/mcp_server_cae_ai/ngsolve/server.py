@@ -359,6 +359,8 @@ def ngsolve_usage(topic: str = "all") -> str:
             "linalg"           - Vector/matrix operations, NumPy interop
             "formulations"     - EM formulations: A, Omega, A-Phi, T-Omega, Kelvin (EMPY)
             "adaptive"         - Adaptive mesh refinement with ZZ error estimator (EMPY)
+            "darwin"           - Darwin approximation, Surface Impedance BC, Extended Darwin
+            "esim"             - ESIM: nonlinear Zs(H,w) Robin BC for any FEM formulation
     """
     return get_ngsolve_documentation(topic)
 
@@ -369,8 +371,8 @@ def sparsesolv(topic: str = "all") -> str:
     Get ngsolve-sparsesolv documentation and code examples.
 
     ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
-    that provides IC, SGS, and BDDC preconditioners with ICCG, SGSMRTR,
-    and CG solvers.
+    that provides IC, SGS, BDDC, and HYPRE AMS preconditioners with ICCG,
+    SGSMRTR, CG, COCR, and GMRES solvers.
 
     Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 
@@ -378,9 +380,10 @@ def sparsesolv(topic: str = "all") -> str:
         topic: Documentation topic. Options:
             "all"              - Complete documentation
             "overview"         - Library overview, add-on positioning, features
-            "api"              - Python API reference (solvers, preconditioners, BDDC)
-            "examples"         - Usage examples (Poisson, curl-curl, complex, BDDC, etc.)
+            "api"              - Python API reference (solvers, preconditioners)
+            "examples"         - Usage examples (Poisson, curl-curl, complex, etc.)
             "abmc"             - ABMC ordering: parallel triangular solve optimization
+            "hypre_ams"        - HYPRE AMS: theory, benchmarks, solver comparison
             "best_practices"   - Preconditioner selection, complex systems, tips
             "build"            - Build and installation instructions
             "example_poisson"  - Ready-to-run: 2D Poisson with ICCG
@@ -389,6 +392,7 @@ def sparsesolv(topic: str = "all") -> str:
             "example_precond"  - Ready-to-run: IC/SGS with NGSolve CGSolver
             "example_divergence" - Ready-to-run: Divergence detection
             "example_bddc"     - Ready-to-run: BDDC preconditioner with CG
+            "example_hypre_ams" - Ready-to-run: HYPRE AMS + GMRES eddy current
     """
     return get_sparsesolv_documentation(topic)
 
