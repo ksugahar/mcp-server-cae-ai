@@ -2,7 +2,7 @@
 ngsolve-sparsesolv knowledge base for Radia MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 2.1.0
+Version: 2.4.0
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
@@ -58,6 +58,8 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 | ICCG     | CG + Incomplete Cholesky preconditioning         | SPD and semi-definite systems   |
 | SGSMRTR  | Min. Residual Truncated + Symmetric Gauss-Seidel | When IC factorization fails     |
 | CG       | Conjugate Gradient (no preconditioning)          | Well-conditioned SPD systems    |
+| COCR     | Conjugate Orth. Conjugate Residual (C++ native)  | Complex-symmetric (A^T=A)       |
+| GMRES    | NGSolve GMResSolver (external)                   | Non-symmetric preconditioners   |
 
 ## Preconditioners
 
@@ -66,6 +68,8 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 | IC             | Incomplete Cholesky with auto-shift for semi-definite systems     |
 | SGS            | Symmetric Gauss-Seidel, factorization-free                        |
 | BDDC           | Balancing Domain Decomposition by Constraints (block elimination) |
+| HYPRE AMS      | Auxiliary-space Maxwell Solver for HCurl eddy current (via HYPRE) |
+| BoomerAMG      | HYPRE BoomerAMG for H1 scalar elliptic systems                    |
 
 ## Key Features
 
@@ -97,6 +101,14 @@ from sparsesolv_ngsolve import (
     SGSPreconditioner,     # SGS preconditioner for use with NGSolve CGSolver
     BDDCPreconditioner,    # BDDC preconditioner (element-by-element)
     SparseSolvResult,      # Result container
+
+    # HYPRE AMS (HCurl eddy current)
+    HypreAMSPreconditioner,              # Real HYPRE AMS
+    ComplexHypreAMSPreconditioner,       # Complex Re/Im TaskManager parallel
+    HypreBoomerAMGPreconditioner,        # H1 AMG
+    has_hypre,                           # HYPRE availability check
+
+    COCRSolver,            # COCR for complex-symmetric (C++ native)
 )
 ```
 
@@ -624,15 +636,16 @@ SPARSESOLV_BEST_PRACTICES = """
 
 ## Preconditioner Selection Guide
 
-| Problem Type                    | Recommended           | Why                              |
-|---------------------------------|-----------------------|----------------------------------|
-| H1 Poisson/Elasticity (small)  | IC (shift=1.05)       | Fast, reliable                   |
-| H1 Poisson/Elasticity (large)  | BDDC                  | Mesh-independent convergence     |
-| HCurl curl-curl (semi-definite)| IC + auto_shift       | Handles kernel automatically     |
-| HCurl eddy current (complex)   | IC (conjugate=False)  | Complex-symmetric, not Hermitian |
-| Large parallel (H1)            | Localized IC + Morton | Full parallelism, low overhead   |
-| Large parallel (HCurl, p>=3)   | ABMC                  | Better scaling than BDDC at p>=3 |
-| Any problem, IC fails          | SGS-MRTR              | No factorization needed          |
+| Problem Type                    | Recommended                  | Why                              |
+|---------------------------------|------------------------------|----------------------------------|
+| H1 Poisson/Elasticity (small)  | IC (shift=1.05)              | Fast, reliable                   |
+| H1 Poisson/Elasticity (large)  | BDDC                         | Mesh-independent convergence     |
+| HCurl curl-curl (semi-definite)| IC + auto_shift              | Handles kernel automatically     |
+| HCurl eddy current (small)     | BDDC+CG (conjugate=False)    | Symmetric preconditioner, memory efficient |
+| HCurl eddy current (large p=1) | **HYPRE AMS+GMRES**          | Stable iteration count at scale (75 it @ 1.44M DOFs) |
+| Large parallel (H1)            | Localized IC + Morton        | Full parallelism, low overhead   |
+| Large parallel (HCurl, p>=3)   | ABMC                         | Better scaling than BDDC at p>=3 |
+| Any problem, IC fails          | SGS-MRTR                     | No factorization needed          |
 
 ## Complex-Valued Problems: conjugate Setting
 
@@ -949,6 +962,211 @@ gfu = GridFunction(fes)
 gfu.vec.data = inv * f.vec
 '''
 
+SPARSESOLV_HYPRE_AMS = """
+# HYPRE AMS Preconditioner (HCurl Eddy Current)
+
+## Overview
+
+HYPRE AMS (Auxiliary-space Maxwell Solver) is a preconditioner for HCurl
+finite element curl-curl + mass systems, from the HYPRE library (Lawrence
+Livermore National Laboratory). SparseSolv wraps HYPRE AMS as an NGSolve
+BaseMatrix and provides ComplexHypreAMSPreconditioner for complex eddy
+current problems with TaskManager Re/Im parallelism.
+
+**When to use**: Large-scale HCurl p=1 eddy current problems (>100K DOFs).
+For small/medium problems, BDDC+CG is competitive and uses less memory.
+
+## Theory: AMS Helmholtz Decomposition
+
+HCurl space has the Helmholtz decomposition: u = grad(phi) + z
+where phi in H1 and z in curl-free complement.
+
+AMS exploits this decomposition via two auxiliary spaces:
+1. **G correction** (gradient): discrete gradient G maps H1 -> HCurl.
+   H1 scalar AMG (BoomerAMG) solves grad(phi) component.
+2. **Pi correction** (Nedelec interpolation): Pi = [diag(x)*G, diag(y)*G, diag(z)*G]
+   maps vertex coordinates to HCurl. Vector H1 AMG solves z component.
+3. **HCurl smoother**: l1-Jacobi or hybrid GS on HCurl space.
+
+These are combined as a multiplicative V-cycle:
+cycle_type=1: relax -> Pi -> G -> Pi -> relax
+
+## Why HYPRE AMS + GMRES for Complex Eddy Current
+
+HYPRE AMS uses hybrid Gauss-Seidel (relax_type=3) internally, making the
+preconditioner **non-symmetric**. Therefore **GMRES is required** (not CG).
+
+Why hybrid GS + GMRES is optimal (not l1-Jacobi + CG):
+- Hybrid GS: GS within processor + Jacobi between = best smoothing + parallelism
+- Fewer iterations compensate for GMRES memory overhead (Krylov basis storage)
+- For complex eddy current with Re/Im splitting, preconditioner quality
+  (= iteration count) dominates total performance
+
+Symmetric smoothers (l1-Jacobi, Chebyshev) would allow CG, but at the cost
+of more iterations. Currently these options are not exposed via Python API.
+
+## Re/Im Splitting for Complex Systems
+
+Complex system (K + jw*sigma*M) * x = b is handled by:
+1. Build real SPD auxiliary matrix: A_real = K + eps*M + |omega|*sigma*M_cond
+2. Create TWO independent HYPRE AMS instances (thread-safe)
+3. Apply: y_re = AMS(x_re), y_im = AMS(x_im) in parallel via TaskManager
+
+ComplexHypreAMSPreconditioner uses ParallelFor(2, ...) for ~1.5x speedup.
+
+## Benchmark Results (GMRES, tol=1e-8)
+
+Hiruma eddy current (Cu coil + Fe core, f=50Hz, 8 threads):
+
+| Mesh  | DOFs  | Python sequential | C++ TaskManager  | Speedup  |
+|-------|------:|------------------:|-----------------:|---------:|
+| 2.5T  | 155k  | 5.40s, 50 it      | **3.43s, 50 it** | **1.57x** |
+| 5.5T  | 331k  | 14.98s, 59 it     | **10.19s, 59 it**| **1.47x** |
+| 20.5T | 1.44M | 103.09s, 75 it    | **69.16s, 75 it**| **1.49x** |
+
+Iteration counts are identical -- same math, only parallelism differs.
+
+## Solver Comparison: ABMC ICCG vs BDDC vs HYPRE AMS
+
+| Aspect           | ABMC ICCG      | BDDC           | HYPRE AMS+GMRES    |
+|------------------|----------------|----------------|---------------------|
+| Target           | General SPD    | General (high-order) | HCurl eddy current |
+| Structure used   | None (algebraic) | Element wirebasket | Helmholtz decomp   |
+| Symmetry         | Symmetric      | Symmetric      | **Non-symmetric**   |
+| Krylov solver    | CG / COCR      | CG / COCR      | **GMRES only**      |
+| Memory           | **Best** (IC+CG=5 vecs) | Medium | **Largest** (GMRES basis + AMG) |
+| Setup cost       | Low            | High           | Medium              |
+| Iteration scaling| h-dependent    | h-independent  | h-quasi-independent |
+
+**Key trade-off**: HYPRE AMS uses more memory than ABMC ICCG (GMRES stores
+m Krylov vectors vs CG's 5), but provides stable iteration counts at scale.
+At 1.44M DOFs: HYPRE AMS = 75 iterations, Custom AMS = 394 iterations.
+
+## Python API
+
+```python
+import sparsesolv_ngsolve as ssn
+
+# Check HYPRE availability
+if not ssn.has_hypre():
+    raise RuntimeError("HYPRE not available")
+
+# Real HYPRE AMS (for real SPD HCurl systems)
+pre_real = ssn.HypreAMSPreconditioner(
+    mat=a_real.mat,                # SparseMatrix<double>
+    grad_mat=G_mat,                # Discrete gradient (fes.CreateGradient())
+    freedofs=fes_real.FreeDofs(),   # Dirichlet mask
+    coord_x=cx, coord_y=cy, coord_z=cz,  # Vertex coordinates
+    cycle_type=1,                  # 1=additive (default)
+    print_level=0)
+
+# Complex HYPRE AMS with TaskManager Re/Im parallelism
+pre_complex = ssn.ComplexHypreAMSPreconditioner(
+    a_real_mat=a_real.mat,         # Real SPD auxiliary matrix
+    grad_mat=G_mat,
+    freedofs=fes_real.FreeDofs(),
+    coord_x=cx, coord_y=cy, coord_z=cz,
+    ndof_complex=fes.ndof,         # Complex DOF count
+    cycle_type=1,
+    print_level=0)
+
+# MUST use GMResSolver (HYPRE AMS is non-symmetric)
+from ngsolve.krylovspace import GMResSolver
+with TaskManager():
+    inv = GMResSolver(mat=a.mat, pre=pre_complex, maxiter=500, tol=1e-8)
+    gfu.vec.data = inv * f.vec
+
+# BoomerAMG for H1 (e.g., thermal, Poisson)
+pre_h1 = ssn.HypreBoomerAMGPreconditioner(
+    mat=a_h1.mat,
+    freedofs=fes_h1.FreeDofs(),
+    relax_type=6,                  # 6=symmetric GS (CG-safe)
+    print_level=0)
+```
+
+## COCR Solver (Complex-Symmetric)
+
+For complex-symmetric systems (A^T = A) with a symmetric preconditioner,
+COCR (Sogabe-Zhang 2007) is optimal: short recurrence, minimizes ||A*r||.
+
+```python
+# COCR with IC preconditioner
+inv = ssn.COCRSolver(a.mat, pre_ic, maxiter=500, tol=1e-8)
+gfu.vec.data = inv * f.vec
+
+# Or via SparseSolvSolver dispatch
+solver = ssn.SparseSolvSolver(a.mat, method="COCR",
+    freedofs=fes.FreeDofs(), tol=1e-10, maxiter=1000)
+```
+
+Note: COCR uses non-conjugated inner product (x^T y, not x^H y).
+For Hermitian systems, use CGSolver(conjugate=True) instead.
+"""
+
+SPARSESOLV_EXAMPLE_HYPRE_AMS = '''# HYPRE AMS for Complex Eddy Current
+# ComplexHypreAMSPreconditioner + GMResSolver (TaskManager parallel Re/Im)
+from ngsolve import *
+import sparsesolv_ngsolve as ssn
+from ngsolve.krylovspace import GMResSolver
+
+# Check HYPRE availability
+assert ssn.has_hypre(), "Build with SPARSESOLV_USE_HYPRE=ON"
+
+# --- Problem setup (simplified eddy current) ---
+from netgen.occ import Box, Pnt
+box = Box(Pnt(0,0,0), Pnt(1,1,1))
+for f in box.faces: f.name = "outer"
+mesh = Mesh(box.GenerateMesh(maxh=0.15))
+
+omega = 2 * 3.14159265 * 50  # 50 Hz
+sigma = 5.96e7  # Cu conductivity
+nu = 1.0  # 1/mu_0 (simplified)
+
+# Complex HCurl space
+fes = HCurl(mesh, order=1, nograds=True, dirichlet="outer", complex=True)
+u, v = fes.TnT()
+a = BilinearForm(fes)
+a += nu * curl(u) * curl(v) * dx
+a += 1j * omega * sigma * u * v * dx
+a.Assemble()
+
+f_vec = LinearForm(fes)
+f_vec += CF((0, 0, 1)) * v * dx
+f_vec.Assemble()
+
+# --- Real auxiliary matrix for HYPRE AMS ---
+fes_real = HCurl(mesh, order=1, nograds=True, dirichlet="outer", complex=False)
+u_r, v_r = fes_real.TnT()
+a_real = BilinearForm(fes_real)
+a_real += nu * curl(u_r) * curl(v_r) * dx
+a_real += 1e-6 * nu * u_r * v_r * dx           # regularization
+a_real += abs(omega) * sigma * u_r * v_r * dx   # eddy current
+a_real.Assemble()
+
+# --- Discrete gradient + vertex coordinates ---
+G_mat, h1_fes = fes_real.CreateGradient()
+nv = mesh.nv
+cx, cy, cz = [0.0]*nv, [0.0]*nv, [0.0]*nv
+for i in range(nv):
+    pt = mesh.ngmesh.Points()[i + 1]  # 1-indexed
+    cx[i], cy[i], cz[i] = pt[0], pt[1], pt[2]
+
+# --- ComplexHypreAMSPreconditioner ---
+pre = ssn.ComplexHypreAMSPreconditioner(
+    a_real_mat=a_real.mat, grad_mat=G_mat,
+    freedofs=fes_real.FreeDofs(),
+    coord_x=cx, coord_y=cy, coord_z=cz,
+    ndof_complex=fes.ndof, cycle_type=1, print_level=1)
+
+# --- Solve with GMRES (HYPRE AMS is non-symmetric -> GMRES required) ---
+gfu = GridFunction(fes)
+with TaskManager():
+    inv = GMResSolver(mat=a.mat, pre=pre, maxiter=500, tol=1e-8, printrates=True)
+    gfu.vec.data = inv * f_vec.vec
+
+print(f"GMRES converged in {inv.GetSteps()} iterations")
+'''
+
 
 def get_full_documentation() -> str:
     """Return complete ngsolve-sparsesolv documentation."""
@@ -957,6 +1175,7 @@ def get_full_documentation() -> str:
         SPARSESOLV_API,
         SPARSESOLV_EXAMPLES,
         SPARSESOLV_ABMC,
+        SPARSESOLV_HYPRE_AMS,
         SPARSESOLV_BEST_PRACTICES,
         SPARSESOLV_BUILD,
     ])
@@ -977,6 +1196,8 @@ def get_sparsesolv_documentation(topic: str = "all") -> str:
         "example_precond": SPARSESOLV_EXAMPLE_PRECOND,
         "example_divergence": SPARSESOLV_EXAMPLE_DIVERGENCE,
         "example_bddc": SPARSESOLV_EXAMPLE_BDDC,
+        "hypre_ams": SPARSESOLV_HYPRE_AMS,
+        "example_hypre_ams": SPARSESOLV_EXAMPLE_HYPRE_AMS,
     }
     topic = topic.lower().strip()
     if topic in ("best-practices", "bestpractices", "tips"):

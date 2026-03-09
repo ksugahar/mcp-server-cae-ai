@@ -383,6 +383,7 @@ def radia_usage(topic: str = "all") -> str:
             "scalar_potential"    - Phi-reduced scalar potential (Radia source + NGSolve FEM)
             "play_models"         - 6 canonical usage patterns (PM, PM+iron, bkg field, etc.)
             "hysteresis"          - B-input Play model, energy-based hysteresis (MatEnergyHysteresis)
+            "esim"                - ESIM: nonlinear surface impedance Zs(H,w) for FEM/PEEC
             "build_and_release"   - Build, CI/CD, wheel build, PyPI publish workflow
     """
     return get_radia_documentation(topic)

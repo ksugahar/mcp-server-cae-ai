@@ -244,12 +244,85 @@ rad.SolverConfig(
     hacapk_eps=1e-4, hacapk_leaf=10, hacapk_eta=2.0,
     relax_param=0.3,
     newton_method=True,
-    newton_damping=True, newton_damping_max_iter=5, newton_damping_min_omega=0.01
+    newton_damping=True, newton_damping_max_iter=5, newton_damping_min_omega=0.01,
+    # B-input solvers for energy-based hysteresis
+    b_input_newton=False,     # Pure B-input Newton (2-4 iter)
+    b_input_hantila=False,    # Newton(3) + Hantila hybrid (recommended for hysteresis)
+    hantila_alpha=0.0,        # Polarization parameter (0 = auto-compute)
+    hantila_relax=0.0,        # Under-relaxation (0 = full step)
 )
 
 # Query current settings
 config = rad.GetSolverConfig()
 ```
+
+## Vector-Accurate Hysteresis Solvers (Energy-Based Materials)
+
+For **energy-based hysteresis materials** (`MatEnergyHysteresis`), Radia provides
+specialized solvers that use **Forward(B->H)** instead of scalar chi for full
+vector magnetization accuracy.
+
+**Why Forward(B->H) for BEM?**
+- Standard chi-based BEM uses Inverse(H->B) -> scalar chi -> M = chi*H (M forced // H)
+- Vector-accurate solver uses Forward(B->H) -> H -> M = B/mu_0 - H (full vector M)
+- Forward(B->H) is the **natural direction for B-input Play** (B drives play operators)
+- Analytical Jacobian from `ComputeJacobian(dBdH)` (energy Hessian, not available in raw Play)
+- Converges in **2-4 iterations** (vs 50+ for chi-based Picard)
+
+**Naming convention**: Code uses B-input Play naming. `Forward(B)` = B->H (natural),
+`Inverse(H)` = H->B (each J_k independent).
+
+```python
+# Enable Newton with Forward for hysteresis problems
+rad.SolverConfig(b_input_newton=True)
+rad.Solve(container, 1e-4, 100, 0)  # method=0 (LU)
+```
+
+### Newton + Hantila Hybrid (Recommended for Hysteresis)
+
+The **hybrid Newton+Hantila** approach combines:
+1. **Newton warmup** (3 iterations): Uses Forward(B->H), O(N^3), analytical Jacobian
+2. **Hantila refinement**: Uses Inverse(H->B), O(N^2), no Schur needed
+
+```python
+# Hybrid Newton(3) + Hantila (recommended for hysteresis)
+rad.SolverConfig(b_input_hantila=True, hantila_alpha=0, hantila_relax=0)
+rad.Solve(container, 1e-4, 5000, 0)
+
+# hantila_alpha=0: auto-compute from material probing (recommended)
+# hantila_alpha=500: manual alpha (for experienced users)
+# hantila_relax=0: full step (default), 0.3: 30% under-relaxation
+```
+
+**Hantila Polarization Method**: Splits M = alpha*H + R, factors (I - alpha*N) once
+(LU), then each iteration uses Inverse(H->B) + O(N^2) back-substitution. For large
+N, this is much faster than O(N^3) Newton per iteration.
+
+### Algorithm
+
+```
+Newton with Forward(B->H):
+  F(M) = M - Forward(mu_0*(H_ext + N*M + M)) / mu_0 = 0
+  Jacobian: dF/dM = I - dJ/dB * (N + I)
+  where dJ/dB = I - mu_0 * inv(dB/dH)  [analytical from energy Hessian]
+
+Newton+Hantila Hybrid:
+  1. Newton warmup (3 iter): Forward(B->H) + Jacobian, full dense solve
+  2. If not converged: Hantila with Inverse(H->B), LU-factored (I - alpha*N)
+  3. If Newton already converged: skip Hantila
+```
+
+### When to Use
+
+| Solver | Use Case |
+|--------|----------|
+| `rad.Solve()` (default) | Linear materials, BH curves (MatSatIsoTab) |
+| `b_input_newton=True` | Hysteresis, few elements, fast convergence needed |
+| `b_input_hantila=True` | **Hysteresis, any size** (recommended) |
+
+**Current limitation**: MMM (tetrahedra, 3 DOF) only. MSC (hexahedra) future.
+
+**Verified**: 0.00% error across 11-step hysteresis loop, 3-47 iterations per step.
 
 ## IMA (Image Method of Analysis) Symmetry
 
@@ -1673,10 +1746,120 @@ for AT in range(1000, 21000, 1000):
     # Newton iteration (typically 3-5 iterations after first level)
 ```
 
+### Reduced vs Total Potential Regions
+
+Classical Simkin-Trowbridge uses two scalar potentials:
+- **Reduced region** (contains coils): H = H_s - grad(phi_r)
+- **Total region** (source-free, iron + air): H = -grad(phi_t)
+  Interface matching conditions connect the two regions.
+
+ScalarPotentialSolver uses **reduced potential everywhere**:
+
+    H = H_s - grad(phi)   in ALL regions (iron, air, kelvin)
+
+This works because H_s (Radia coil field) is accurately computed
+via VoxelCoefficient grid interpolation. Air regions CAN be included
+in either reduced or total approach without affecting accuracy.
+
+**IMPORTANT**: H_s is a **magnetic field vector** (A/m) from Biot-Savart
+(free-space field, as if no iron exists). It is NOT a scalar potential.
+Compute via `rad.Fld(coil, 'h', points)`.
+
+### Source Field H_s Computation
+
+H_s is the coil field in FREE SPACE (no iron). It is a 3-component
+vector field, NOT a scalar potential phi.
+
+ScalarPotentialSolver computes it automatically:
+
+```python
+solver.set_source_from_radia(coil, resolution=51)
+# Internally: rad.Fld(coil, 'h', grid_points) -> VoxelCoefficient
+```
+
+Resolution 31-51 points per axis is typically sufficient.
+
+Alternative source methods:
+```python
+# From a callback function
+solver.set_source_from_callback(
+    lambda x, y, z: (Hx, Hy, Hz), resolution=31)
+
+# From an existing NGSolve CoefficientFunction
+solver.set_source_cf(H_source_coefficient_function)
+```
+
+### Nonlinear Solver API
+
+```python
+solver = ScalarPotentialSolver(
+    mesh, iron_domains='iron', order=2,
+    kelvin_region='kelvin', kelvin_radius=0.3,
+    kelvin_center=[0, 0.07, 0])
+solver.set_source_from_radia(coil, resolution=51)
+
+# Newton (RECOMMENDED) -- quadratic convergence, ~30 iterations
+phi = solver.solve_nonlinear_newton(
+    bh_data=bh_data,   # [[H(A/m), B(T)], ...]
+    tol=1e-4,
+    maxiter=80,
+    dirichlet='outer')
+
+# Picard (fixed-point) -- linear convergence, needs under-relaxation
+phi = solver.solve_nonlinear(
+    bh_data=bh_data,
+    tol=1e-4,
+    maxiter=50,
+    relax=0.3,           # 0=full step, 0.3=30% damping
+    dirichlet='outer')
+
+# Post-process
+B_cf = solver.get_B()   # CoefficientFunction
+H_cf = solver.get_H()
+```
+
+Newton is strongly recommended: quadratic convergence, energy-based
+line search, typically ~30 iterations. Picard converges linearly and
+may need significant under-relaxation (relax=0.3-0.5) for stability.
+
+### Verified: C-type Electromagnet (NI=20000 AT)
+
+| Pole Geometry | FEM Bz (mT) | vs BEM ~945 mT |
+|---------------|-------------|----------------|
+| Rectangular   | -834        | 11.8% error    |
+| Y-Z taper     | -910        | 3.8% error     |
+| 3D frustum    | -956        | 1.2% error     |
+
+**Key lesson**: Nonlinear results are very sensitive to pole tip
+geometry. Linear results (mu_r=1000) are robust (~1% error even
+with rectangular poles). Always verify geometry against reference.
+
+### Pole Tip Geometry: Frustum with GmshBuilder
+
+For tapered pole tips (truncated pyramid), use `add_thru_sections`:
+
+```python
+from radia.gmsh_builder import GmshBuilder
+
+with GmshBuilder(model_name='yoke') as gb:
+    # Main body: C-shape polygon extruded in X (poles end at Z=+-13mm)
+    main_vol = _extrude_polygon(gb, main_polygon_yz)
+
+    # Frustum pole tip: Z=-13mm to Z=-5mm, tapering in X and Y
+    # Base at Z=-13: [-25,25] x [-20,20] mm
+    # Tip  at Z=-5:  [-17,17] x [-12,12] mm (45-degree chamfer)
+    w_base = _make_rect_wire(gb, -0.025, 0.025, -0.020, 0.020, -0.013)
+    w_tip  = _make_rect_wire(gb, -0.017, 0.017, -0.012, 0.012, -0.005)
+    frustum = gb.add_thru_sections([w_base, w_tip], make_solid=True)
+
+    # Fuse main body + two frustum pole tips
+    yoke = gb.fuse([main_vol, frustum_bot, frustum_top])
+```
+
 ## Examples
 
 - `examples/NGSolve_Integration/demo_ctype_simkin.py` - Linear Simkin + Kelvin
-- `examples/NGSolve_Integration/demo_nonlinear_simkin.py` - B-H curve Picard
+- `examples/NGSolve_Integration/test_elf_yoke_simkin.py` - Nonlinear + 3 geometry variants
 - `examples/NGSolve_Integration/demo_hysteresis_simkin.py` - Energy hysteresis
 
 ## Reference
@@ -1684,6 +1867,178 @@ for AT in range(1000, 21000, 1000):
 J. Simkin and C. W. Trowbridge, "On the use of the total scalar potential
 in the numerical solution of field problems in electromagnetics,"
 Int. J. Numer. Methods Eng., vol. 14, pp. 423-440, 1979.
+"""
+
+RADIA_VECTOR_POTENTIAL = """
+# VectorPotentialSolver: Reduced Vector Potential (A_r) Formulation
+
+## Formulation
+
+B = B_s + curl(A_r)
+
+- B_s: Biot-Savart source field from Radia coil (`rad.Fld(coil, 'b', points)`)
+- A_r: Reduced vector potential (material response only)
+- HCurl FE space with `nograds=True` gauge
+
+### Linear Weak Form
+
+    int(nu * curl(A_r) . curl(v)) dx = int((nu_0 - nu) * B_s . curl(v)) dx
+
+- nu = 1/(mu_0 * mu_r) (reluctivity), nu_0 = 1/mu_0
+- RHS non-zero only in iron domains (nu != nu_0)
+
+### Nonlinear Newton (SymbolicEnergy + Coenergy)
+
+Minimize reduced energy:
+
+    E(A_r) = int w*(|B_s + curl(A_r)|) dOmega - nu_0 * int B_s . curl(A_r) dOmega
+
+- w*(B) = integral_0^B H(B') dB' (magnetic coenergy)
+- Air: w*(B) = B^2/(2*mu_0)
+- Iron: w*(B) from inverted B-H curve via BSpline.Integrate()
+- Source coupling term -nu_0 * B_s . curl(A_r) is CRITICAL (ensures curl(H_r)=0)
+
+Without the source coupling term, the energy stationarity gives curl(H)=0 (wrong).
+With it, stationarity gives curl(H - H_s) = 0, i.e. curl(H_r) = 0 (correct).
+
+## Comparison with ScalarPotentialSolver (Simkin)
+
+| Item | phi_r (Simkin) | A_r (This solver) |
+|------|----------------|-------------------|
+| Unknown | phi (H1, scalar) | A_r (HCurl, vector) |
+| Source | H_s (rad.Fld 'h') | B_s (rad.Fld 'b') |
+| Operator | grad(phi), grad(v) | curl(A), curl(v) |
+| Coefficient | mu (permeability) | nu = 1/mu (reluctivity) |
+| Energy | w(H) = int B(H')dH' | w*(B) = int H(B')dB' |
+| Gauge | Not needed | nograds=True + eps regularization |
+| DOFs | ~N_vertices | ~N_edges (3-5x more) |
+
+## API
+
+```python
+from radia.vector_potential_solver import VectorPotentialSolver
+
+solver = VectorPotentialSolver(mesh, iron_domains='iron', mu_r=1000.0, order=2)
+solver.set_source_from_radia(coil, resolution=41)
+
+# Linear solve
+solver.solve_linear(dirichlet='outer')
+
+# Nonlinear Newton (RECOMMENDED)
+solver.solve_nonlinear_newton(bh_data=bh_data, tol=1e-4, maxiter=50, dirichlet='outer')
+
+# Nonlinear Picard
+solver.solve_nonlinear(bh_data=bh_data, tol=1e-4, maxiter=50, relax=0.3, dirichlet='outer')
+
+# Hysteresis (Hantila polarization method, energy play model)
+solver.solve_hysteresis(mat_factory, tol=1e-3, maxiter=60, alpha=500.0,
+                        dirichlet='outer', relax=0.5)
+
+# Results
+B = solver.get_B()    # CoefficientFunction: B_s + curl(A_r)
+H = solver.get_H()    # CoefficientFunction: nu * B
+A = solver.get_A()    # GridFunction (HCurl)
+B_gf = solver.project_to_hdiv()  # HDiv GridFunction
+```
+
+## Hysteresis: Hantila Polarization Method for A_r
+
+Uses the Hantila (1975) polarization method adapted for vector potential:
+
+    H = (B/mu_0 - R_prev) / (1 + alpha)
+
+This derives H from B **without needing the Forward(B->H) operator**.
+Only the Inverse operator `rad.MatMvsH(handle, 'm', H_vec)` is used.
+
+- LHS (constant): nu_alpha * curl(A).curl(v) [iron] + nu_0 * curl(A).curl(v) [air]
+  where nu_alpha = 1/(mu_0*(1+alpha))
+- RHS (updated): (nu_0 - nu_alpha) * B_s.curl(v) + R/(1+alpha) . curl(v) [iron]
+- R = M - alpha*H (polarization residual), updated each iteration
+- Under-relaxation (`relax` parameter) damps oscillation near play model
+  pinning thresholds where local dM/dH may exceed alpha
+- Convergence: max|dB|/B_sat < tol
+
+**A_r is the RECOMMENDED solver for B-input hysteresis models**:
+- B = B_s + curl(A_r) is the primary variable -> B directly available for Play operator input
+- ScalarPotentialSolver computes H = H_s - grad(phi) first, then derives B via constitutive law;
+  H_s and grad(phi) cancellation degrades B accuracy (especially at high mu_r)
+- Test results confirm: A_r oscillation amplitude 0.06 vs Simkin 0.21
+
+The Hantila method is also available for ScalarPotentialSolver (less accurate for B-input models):
+```python
+from radia.scalar_potential_solver import ScalarPotentialSolver
+solver_S = ScalarPotentialSolver(mesh, iron_domains='iron', order=2,
+                                  kelvin_region='kelvin', kelvin_radius=R,
+                                  kelvin_center=center)
+solver_S.set_source_from_radia(coil, resolution=41)
+solver_S.solve_hysteresis(mat_factory, tol=1e-3, maxiter=60,
+                          alpha=500.0, dirichlet='outer', relax=0.5)
+```
+
+## Verified Results (C-type Electromagnet, Frustum Poles)
+
+### Linear (mu_r=1000, NI=2000)
+- A_r: Bz = -231.71 mT (0.1% vs BEM ~-232 mT)
+- Simkin: Bz = -230.31 mT (0.7% vs BEM)
+- A_r vs Simkin: 0.6%
+
+### Nonlinear (BH curve, NI=20000)
+- A_r Newton: Bz = -999.15 mT (5.7% vs BEM ~-945 mT)
+- Simkin Newton: Bz = -922.40 mT (2.4% vs BEM)
+
+### Hysteresis (Energy Play, NI=20000)
+- A_r Hantila: Bz = -741 mT
+- Simkin Hantila: Bz = -729 mT
+- A_r vs Simkin: 1.6%
+
+## FEM -> Radia Analytical Field Pipeline (Beam Tracking)
+
+After solve_hysteresis(), the solved per-element magnetization M can be
+exported to Radia objects for exact analytical field evaluation in the gap
+(no mesh needed, no cancellation error):
+
+```python
+# 1. Solve hysteresis
+solver = VectorPotentialSolver(mesh, iron_domains='iron', mu_r=1000.0, order=2)
+solver.set_source_from_radia(coil)
+solver.solve_hysteresis(mat_factory, alpha=500.0, relax=0.5)
+
+# 2. Export to Radia (iron M + coil combined)
+combined = solver.to_radia(coil=coil)
+
+# 3. Exact analytical B at any point (no gap mesh needed)
+B = rad.Fld(combined, 'b', [0, 0, 0])           # single point
+B_batch = rad.Fld(combined, 'b', points_Nx3)     # batch (N,3)
+
+# 4. VoxelCoefficientFunction for fast trajectory integration
+from radia.radia_ngsolve import create_voxel_cf
+B_voxel = create_voxel_cf(combined, 'b', mesh=mesh, resolution=61)
+```
+
+**Why this is better than FEM direct evaluation**:
+- Radia surface charge formulas are **exact** for constant M per element
+- No H_s - grad(phi) cancellation error
+- No mesh resolution limitation in gap
+- Arbitrary evaluation points without element search
+
+**API**:
+- `solver.get_M_per_element()` -> dict {el_nr: [Mx, My, Mz]} in A/m
+- `solver.to_radia(coil=None)` -> Radia container handle
+- Available on both VectorPotentialSolver and ScalarPotentialSolver
+
+### Verified Results (C-type, NI=20000, Energy Play)
+- FEM direct Bz at gap center: -741 mT
+- Radia analytical Bz: -771 mT
+- Agreement: 4.1%
+- 2197 iron elements converted in 0.2s
+
+## Test Scripts
+
+- `examples/NGSolve_Integration/test_ctype_A_formulation.py` - Linear/nonlinear comparison
+- `examples/NGSolve_Integration/test_hysteresis_comparison.py` - Hysteresis A_r vs Simkin
+- `examples/NGSolve_Integration/test_fem_to_radia_field.py` - FEM->Radia analytical pipeline
+- `examples/NGSolve_Integration/demo_hysteresis_simkin.py` - Hysteresis AC loop demo
+- `examples/KelvinTransformation/A-formulation/` - Kelvin + A_r examples
 """
 
 RADIA_PLAY_MODELS = """
@@ -1897,44 +2252,63 @@ rad.UtiDelAll()
 
 
 RADIA_HYSTERESIS = """
-# Magnetic Hysteresis: B-input Play Model + Energy-Based Formulation
+# Magnetic Hysteresis: B-input Energy-Based Vector Hysteresis
 
-Radia supports **vector magnetic hysteresis** via an energy-based formulation
-(Francois-Lavet / Egger et al.) that is thermodynamically consistent and
-computationally efficient. The B-input Play model data (measured B-H loops,
-JMAG .hys files, MATLAB .mat files) is converted to energy-based parameters
-for the C++ solver.
+Radia supports **vector magnetic hysteresis** via an **energy-based model**
+that **approximates the B-input Play model** (Sugahara & Hane, Kindai University).
+The measured B-H loop data (JMAG .hys files, MATLAB .mat files) is fitted
+using B-input Play, then converted to energy parameters for the C++ solver.
 
----
+## Why B-input Play (Reference Model)
 
-## Overview: Why Energy-Based, Not Direct Play?
+The **B-input Play model** uses play operators driven by B (not H):
+- `p_k(B)`: play operator with threshold eta_k in B-space
+- `H = sum f_k(|p_k|) * (p_k / |p_k|)`: constitutive relation
+- Natural direction: **B -> H** (direct evaluation)
+- H -> B: **implicit** (requires fminsearch -- this motivates the energy model)
 
-| Feature | B-input Play (Matsuo) | Energy-based (Egger) |
-|---------|----------------------|---------------------|
-| Thermodynamic consistency | Approximate | **Exact** |
-| Iron loss | Loop area (approximate) | **Local energy dissipation** |
-| Inverse operator (H -> B) | fminsearch O(100K) | **Schur complement O(K)** |
-| Congruency | **H-axis congruent** (see below) | **Structurally guaranteed** |
-| Vector extension | 2D -> 3D natural | **Arbitrary dimension** |
+Most Play models in literature are **H-input** (H drives operators). B-input
+is the **physically correct** choice:
 
-### Congruency Direction (合同性の方向)
+| Property | B-input (Sugahara/Hane) | H-input (literature majority) |
+|----------|------------------------|-------------------------------|
+| Play operator input | **B** | H |
+| Natural direction | **B -> H** | H -> B |
+| H-axis congruency | **Reproduced** (matches measurement) | **Not reproduced** |
 
-B-input Play model operates in **B-space** (thresholds eta_k in B).
-For minor loops with the same B-amplitude at different DC bias:
-- The Play operator state changes are identical (same delta-B -> same delta-p_k)
-- Therefore the **H output is congruent** (same shape regardless of DC bias)
-- This is **H-axis congruency** (H軸方向の合同性)
+## Energy-Based Approximation (Forward Model)
 
-| Model | Input | Output | Congruency |
-|-------|-------|--------|------------|
-| H-input Play | H | B | Not congruent (non-physical) |
-| **B-input Play** | **B** | **H** | **H-axis congruent** |
-| Energy-based | H <-> B | both | Structurally guaranteed |
+The energy-based model is constructed to **approximate B-input Play** while
+providing efficient H -> B computation for BEM:
 
-Radia's solver computes H, then needs B = f(H). The B-input Play model requires
-solving an inverse problem (B -> H is the natural direction). Egger's Schur
-complement trick makes the inverse operator O(K) -- same cost as the forward
-operator.
+**Derivation from B-input Play parameters**:
+1. U_k(r) = integral f_k(s) ds  (key identity: **U_k' = f_k**, same shape functions)
+2. chi_k = eta_k  (pinning = play threshold)
+3. |x| -> |x|_eps  (regularization for smoothness)
+4. G* = sum [U_k(|J_k|) - <H, J_k> + chi_k |J_k - J_{k,p}|_eps]
+
+The **Forward model** minimizes G* per J_k independently:
+```
+J_k = argmin_J [ U_k(|J|) - <H, J> + chi_k |J - J_{k,p}|_eps ]
+B = mu_0 * H + sum J_k
+```
+Each J_k is independent, O(K), **no special processing needed**.
+
+**Naming convention** (B-input Play naming):
+- `Forward(B)` = B -> H: natural direction for B-input Play, Schur complement O(K)
+- `Inverse(H)` = H -> B: each J_k independent, O(K), no Schur needed
+
+For Forward, Egger's Schur complement is referenced mathematically, but the
+**physical correctness** comes from B-input parameterization (congruency).
+
+## Formulation Compatibility
+
+| Field Formulation | Primary Variable | Operator | Processing |
+|-------------------|-----------------|----------|------------|
+| **A-formulation** (FEM) | B = curl(A) | Forward(B->H) | Schur O(K) |
+| **BEM standard** (Radia) | H | Inverse(H->B) | **None** (each J_k indep.) |
+| **Hantila BEM** | H | Inverse(H->B) | **None** |
+| **Newton BEM** (vector M) | M -> B | Forward(B->H) | Schur O(K) |
 
 ---
 
@@ -1953,10 +2327,10 @@ hysteresis_io.load_hys() / load_mat()    -> list of {B, H, Bmax} loops
 hysteresis_io.build_shape_functions()     -> eta (thresholds), f_k (shape funcs)
   |
   v
-hysteresis_io.convert_play_to_energy()    -> K, As, Js, chi
+hysteresis_io.convert_play_to_energy()    -> K, chi, f_k_tables
   |
   v
-rad.MatEnergyHysteresis(K, As, Js, chi, eps)   -> material handle
+rad.MatEnergyHysteresis(K, chi, f_k_tables, eps)   -> material handle
   |
   v
 rad.MatApl(iron_element, mat_handle)
@@ -1967,26 +2341,24 @@ rad.Solve(container, tol, maxiter, method)
 
 ## API Reference
 
-### rad.MatEnergyHysteresis(K, As, Js, chi, eps=1e-8)
+### rad.MatEnergyHysteresis(K, chi, f_k_tables, eps=1e-8)
 
-Create an energy-based vector hysteresis material.
+Create an energy-based vector hysteresis material with table-based shape functions.
 
 **Parameters:**
 
 | Parameter | Type | Unit | Description |
 |-----------|------|------|-------------|
 | K | int | - | Number of partial polarizations (play operators) |
-| As | array(K) | A/m | Saturation slope A_{s,k} for each partial polarization |
-| Js | array(K) | T | Saturation polarization J_{s,k} for each partial polarization |
 | chi | array(K) | A/m | Pinning strength chi_k (= Play threshold eta_k) |
+| f_k_tables | list of (r, f) tuples | T, A/m | Shape function tables per operator |
 | eps | float | - | Regularization parameter (default 1e-8) |
 
 **Returns:** Material handle (int)
 
-**Internal energy density per partial polarization:**
-```
-U_k(J) = -(2 * A_{s,k} * J_{s,k}) / pi * log(cos(pi/2 * J / J_{s,k}))
-```
+**Shape function f_k(r) = U_k'(r):** tabulated at grid points r[i] with values f[i].
+Internal energy U_k and derivative f_k' are precomputed via trapezoidal integration
+and finite differences.
 
 ### rad.MatMvsH(mat, component, H)
 
@@ -2001,9 +2373,9 @@ M = rad.MatMvsH(mat_handle, 'm', [Hx, Hy, Hz])
 
 ## Usage Patterns
 
-### Pattern 1: Direct Parameter Specification
+### Pattern 1: Direct Table Specification
 
-For known energy-based parameters (e.g., from literature or fitting):
+For known shape functions (e.g., from B-input Play model fitting):
 
 ```python
 import radia as rad
@@ -2012,12 +2384,18 @@ import numpy as np
 rad.UtiDelAll()
 
 K = 10
-As = np.full(K, 5000.0)       # Saturation slope [A/m]
-Js = np.full(K, 0.2)          # Saturation polarization [T]
 chi = np.linspace(0, 300, K)  # Pinning strengths [A/m]
 eps = 1e-8
 
-mat = rad.MatEnergyHysteresis(K, As, Js, chi, eps)
+# Build shape function tables (here from analytical formula for demo)
+tables = []
+for k in range(K):
+    r = np.linspace(0, 0.2, 200)  # |J| grid [0, J_sat]
+    f = 5000.0 * np.tan(np.pi/2 * r / 0.2)  # f_k(r) = U_k'(r)
+    f[-1] = f[-2] * 2  # avoid inf
+    tables.append((r, f))
+
+mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
 
 # Apply to iron element
 iron = rad.ObjRecMag([0, 0, 0], [0.01, 0.01, 0.01], [0, 0, 0])
@@ -2040,13 +2418,11 @@ from radia.hysteresis_io import hys_to_radia
 
 rad.UtiDelAll()
 
-# One-step: .hys -> energy-based parameters
+# One-step: .hys -> table-based energy parameters
 params = hys_to_radia('material.hys', K=20, eps=1e-8)
-# params = {'K': 20, 'As': array, 'Js': array, 'chi': array, 'eps': 1e-8}
+# params = {'K': 20, 'chi': array, 'f_k_tables': [...], 'eps': 1e-8}
 
-mat = rad.MatEnergyHysteresis(
-    params['K'], params['As'], params['Js'], params['chi'], params['eps']
-)
+mat = rad.MatEnergyHysteresis(**params)
 
 iron = rad.ObjRecMag([0, 0, 0], [0.01, 0.01, 0.01], [0, 0, 0])
 rad.MatApl(iron, mat)
@@ -2060,9 +2436,7 @@ rad.UtiDelAll()
 from radia.hysteresis_io import mat_to_radia
 
 params = mat_to_radia('B_input.mat', eps=1e-8)
-mat = rad.MatEnergyHysteresis(
-    params['K'], params['As'], params['Js'], params['chi'], params['eps']
-)
+mat = rad.MatEnergyHysteresis(**params)
 ```
 
 ### Pattern 4: Step-by-Step (Custom Processing)
@@ -2081,12 +2455,12 @@ eta, f_k_tables, Bplay = build_shape_functions(loops)
 
 # Step 3: Convert to energy-based parameters
 energy_params = convert_play_to_energy(eta, f_k_tables)
-# energy_params = {'K': int, 'As': array, 'Js': array, 'chi': array}
+# energy_params = {'K': int, 'chi': array, 'f_k_tables': [...]}
 
 # Step 4: Create Radia material
 mat = rad.MatEnergyHysteresis(
-    energy_params['K'], energy_params['As'],
-    energy_params['Js'], energy_params['chi'], 1e-8
+    energy_params['K'], energy_params['chi'],
+    energy_params['f_k_tables'], 1e-8
 )
 ```
 
@@ -2103,10 +2477,14 @@ MU_0 = 4e-7 * np.pi
 rad.UtiDelAll()
 
 K = 10
-As = np.full(K, 5000.0)
-Js = np.full(K, 0.2)
 chi = np.linspace(0, 300, K)
-mat = rad.MatEnergyHysteresis(K, As, Js, chi, 1e-8)
+tables = []
+for k in range(K):
+    r = np.linspace(0, 0.2, 200)
+    f = 5000.0 * np.tan(np.pi/2 * r / 0.2)
+    f[-1] = f[-2] * 2
+    tables.append((r, f))
+mat = rad.MatEnergyHysteresis(K, chi, tables, 1e-8)
 
 # Drive with sinusoidal H
 Hmax = 1000.0
@@ -2135,9 +2513,9 @@ Location: `src/radia/hysteresis_io.py`
 | `load_mat(filepath)` | .mat file path | loops, dB, BMax | MATLAB .mat reader (Potter-Schmulian) |
 | `build_shape_functions(loops, dB)` | B-H loops | eta, f_k_tables, Bplay | ShapeFunction.m port |
 | `play_hysteron(f_k, Bx, By, eta, px, py)` | shape funcs + B | Hx, Hy, px, py | PlayHysteron.m port (verification) |
-| `convert_play_to_energy(eta, f_k_tables)` | Play params | {K, As, Js, chi} | Play -> energy conversion |
-| `hys_to_radia(filepath, K, eps)` | .hys path | {K, As, Js, chi, eps} | One-step .hys -> Radia |
-| `mat_to_radia(filepath, eps)` | .mat path | {K, As, Js, chi, eps} | One-step .mat -> Radia |
+| `convert_play_to_energy(eta, f_k_tables)` | Play params | {K, chi, f_k_tables} | Play -> energy conversion |
+| `hys_to_radia(filepath, K, eps)` | .hys path | {K, chi, f_k_tables, eps} | One-step .hys -> Radia |
+| `mat_to_radia(filepath, eps)` | .mat path | {K, chi, f_k_tables, eps} | One-step .mat -> Radia |
 
 ### .hys File Format (JMAG)
 
@@ -2162,27 +2540,42 @@ MATLAB .mat file with variables:
 
 ## Mathematical Background
 
-### Energy-Based Model (Francois-Lavet / Egger)
+### B-input Play Model (Reference)
 
-**Forward operator** (H -> B):
 ```
+p_k(B) = play operator with threshold eta_k in B-space
+H = sum_k f_k(|p_k|) * (p_k / |p_k|)
+```
+- Natural direction: B -> H (direct)
+- H -> B: implicit (fminsearch needed)
+
+### Energy-Based Approximation
+
+Derived from B-input Play: U_k' = f_k, chi_k = eta_k.
+
+**Inverse(H -> B)** [each J_k independent]:
+```
+J_k = argmin_J [ U_k(|J|) - <H, J> + chi_k * |J - J_{k,prev}|_eps ]
 B = mu_0 * H + sum_k J_k
-J_k = argmin_J [ U_k(J) - <H, J> + chi_k * |J - J_{k,prev}|_eps ]
 ```
-Each J_k solved independently via Newton (2nd order convergence, 3-5 iterations).
+Each J_k independent, O(K). BEM standard path.
 
-**Inverse operator** (B -> H) -- used by Radia solver:
+**Forward(B -> H)** [natural direction for B-input Play]:
 ```
-H = nu_0 * (B - sum_k J_k)
-{J_k} = argmin [ (nu_0/2)|B - sum_k J_k|^2 + sum_k [U_k(J_k) + chi_k|J_k - J_{k,prev}|_eps] ]
+{J_k} = argmin [ (nu_0/2)|B - sum J_k|^2 + sum [U_k + chi_k|J_k - J_{k,prev}|_eps] ]
+H = nu_0 * (B - sum J_k)
 ```
-Schur complement trick reduces coupled K-body problem to O(K).
+Schur complement (Egger's math), O(K). A-method, Newton BEM.
 
-### Relationship: Play Model <-> Energy Model
+**ComputeJacobian**: dB/dH = mu_0*I + sum H_k^{-1} from energy Hessian.
+Not available in raw B-input Play model -- key advantage of energy framework.
 
-- Play threshold eta_k corresponds to pinning strength chi_k
-- Shape function f_k(|p|) corresponds to energy derivative U_k'(J)
-- Shape functions from `build_shape_functions()` are integrated to obtain U_k
+### Key Identity: f_k = U_k'
+
+- B-input Play shape function f_k = energy derivative U_k'
+- B-input Play threshold eta_k = pinning strength chi_k
+- Approximation source: eps-regularization (|x| -> |x|_eps)
+- As eps -> 0: energy model converges to B-input Play
 
 ### Parameter Guidelines
 
@@ -2234,7 +2627,7 @@ rad.UtiDelAll()
 
 # 1. Create unmagnetized PM element with hysteresis material
 pm = rad.ObjRecMag([0, 0, 0], [0.02, 0.02, 0.01], [0, 0, 0])  # M=0 initially
-mat = rad.MatEnergyHysteresis(K, As, Js, chi, eps)
+mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
 rad.MatApl(pm, mat)
 
 # 2. Apply strong magnetizing field (着磁パルス)
@@ -2259,46 +2652,413 @@ this is exactly the physics of magnetization.
 
 ---
 
+## BEM Solver Integration (C++)
+
+Radia's C++ BEM core provides two solver paths for energy-based hysteresis:
+
+### Standard Path: Inverse(H->B) + Scalar Chi
+
+Standard chi-based BEM uses Inverse(H->B) to compute scalar chi, then M = chi*H.
+Simple, no Schur needed. Adequate for most cases.
+
+### Optional: Vector-Accurate Newton (Forward)
+
+For hysteresis where M does not align with H, the Newton variant uses
+Forward(B->H) for full vector M:
+
+1. **Full vector M**: Forward(B) -> H, then M = B/mu_0 - H (not scalar chi)
+2. **Forward(B->H) is O(K)**: Egger's Schur complement (mathematical reference).
+   This is the **natural direction for B-input Play**.
+3. **Analytical Jacobian**: from energy Hessian (not available in raw Play).
+4. **State management**: Save/Restore/Commit for Play operator states.
+
+### Newton with Forward (b_input_newton=True)
+
+Newton-Raphson using Forward(B->H) for vector-accurate M:
+
+```
+F(M) = M - Forward(mu_0*(H_ext + N*M + M)) / mu_0 = 0
+J_F = I - block_diag(dJ/dB) * (N + I)    [full dense Jacobian]
+dM = J_F^{-1} * (-F)                     [LAPACK dgesv_]
+```
+
+- Converges in **2-4 iterations** (quadratic convergence)
+- O(N^3) per iteration (dense Jacobian solve)
+- Best for small problems (N < 500)
+
+```python
+rad.SolverConfig(b_input_newton=True)
+rad.Solve(container, 1e-4, 100, 0)
+```
+
+### Newton + Hantila Hybrid (b_input_hantila=True, RECOMMENDED)
+
+Combines Newton warmup (Forward) with Hantila refinement (Inverse):
+
+```
+Phase 1: Newton warmup (3 iterations)
+  - Uses Forward(B->H): Schur complement, analytical Jacobian
+  - Full Jacobian J_F, LAPACK dgesv_, O(N^3) per iteration
+  - Gets close to solution quickly
+
+Phase 2: Hantila refinement (if Newton didn't fully converge)
+  - Uses Inverse(H->B): simple, no Schur needed
+  - Splits M = alpha*H + R, factors (I - alpha*N) ONCE (LU)
+  - Each iteration: O(N^2) back-substitution
+  - auto-alpha: probes material at 7 H values to find max susceptibility
+```
+
+- Converges in **3-47 iterations** total (depends on field step size)
+- For large N: Hantila phase is O(N^2) per iter vs Newton's O(N^3)
+- 0.00% error across 11-step hysteresis loop (verified)
+
+```python
+rad.SolverConfig(b_input_hantila=True)
+rad.Solve(container, 1e-4, 5000, 0)
+
+# With manual alpha (faster if you know the right value)
+rad.SolverConfig(b_input_hantila=True, hantila_alpha=500.0)
+```
+
+### Hysteresis Loop Workflow (C++ BEM)
+
+```python
+import radia as rad
+import numpy as np
+
+MU_0 = 4e-7 * np.pi
+
+rad.UtiDelAll()
+
+# 1. Create tetrahedral iron with energy hysteresis material
+iron = rad.ObjTetrahedron(tet_vertices, [0, 0, 0])
+mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
+rad.MatApl(iron, mat)
+
+# 2. Enable B-input Hantila solver
+rad.SolverConfig(b_input_hantila=True)
+
+# 3. Step through field values (hysteresis loop)
+B_ext_values = [0.05, 0.1, 0.15, 0.2, 0.15, 0.1, 0.05, 0, -0.05, -0.1, 0]
+for B_ext in B_ext_values:
+    bkg = rad.ObjBckg(lambda p, b=B_ext: [0, 0, b])
+    container = rad.ObjCnt([iron, bkg])
+    result = rad.Solve(container, 1e-4, 5000, 0)
+    B = rad.Fld(container, 'b', [0, 0, 0.05])
+    print(f"B_ext={B_ext:.2f} T -> B_gap={B[2]:.4f} T, iters={result[0]}")
+
+rad.UtiDelAll()
+```
+
+### Comparison: Standard vs Vector-Accurate Solvers
+
+| Feature | Standard (chi-based) | Newton (Forward) | Newton+Hantila Hybrid |
+|---------|---------------------|-------------------|----------------------|
+| Operator used | Inverse(H->B) | Forward(B->H) | Forward + Inverse |
+| M accuracy | Scalar chi (M // H) | **Full vector M** | **Full vector M** |
+| Materials | MatLin, MatSatIsoTab, MatEnergyHysteresis | MatEnergyHysteresis | MatEnergyHysteresis |
+| Jacobian | chi-based | **Analytical dJ/dB** | Analytical + Hantila |
+| Matrix factorization | Every iteration | Every iteration | **Once** (LU) |
+| Cost per iteration | O(N^3) | O(N^3) | **O(N^2)** |
+| Convergence | 5-50 (Picard) | **2-4** | **3-47** |
+| State management | chi only | Save/Restore/Commit | Save/Restore/Commit |
+
+---
+
+## FEM Solver Integration (Hantila Polarization Method)
+
+The energy-based model (Forward) integrates with NGSolve FEM solvers via
+**Hantila (1975) polarization method**. Both scalar and vector potential
+formulations are supported.
+
+**Note**: For A-formulation, B = curl(A) is directly available, so
+Forward(B->H) could be used (natural direction for B-input Play).
+However, FEM Hantila with Inverse(H->B) is already sufficient.
+
+### Available Solvers
+
+| Solver | Method | H derivation | Operator Used |
+|--------|--------|-------------|---------------|
+| `ScalarPotentialSolver.solve_hysteresis()` | Simkin reduced phi_r | H = H_s - grad(phi) | Inverse(H->B) |
+| `VectorPotentialSolver.solve_hysteresis()` | Reduced A_r | H = (B/mu_0 - R)/(1+alpha) | Inverse(H->B) |
+
+### Hantila Polarization Method
+
+Splits constitutive relation into linear + residual:
+```
+B = mu_0*(1+alpha)*H + mu_0*R    where R = M - alpha*H
+```
+
+- LHS is constant (assembled once): mu_0*(1+alpha) in iron, mu_0 in air
+- RHS updated each iteration with R from Inverse(H->B) -> M
+- Guaranteed convergence when alpha >= max(dM/dH)
+- Only Inverse(H->B) operator via `rad.MatMvsH()` needed (no Forward/Schur)
+- `relax` parameter (0-1) damps oscillation near play model pinning thresholds
+
+### Usage Pattern
+
+```python
+from radia.scalar_potential_solver import ScalarPotentialSolver
+from radia.vector_potential_solver import VectorPotentialSolver
+
+# Material factory (creates independent per-element handles)
+def mat_factory():
+    return rad.MatEnergyHysteresis(K, chi, tables, eps)
+
+# Vector potential (A_r) -- RECOMMENDED for B-input hysteresis
+# B = B_s + curl(A_r) is primary variable -> B directly available for Play operator
+solver_A = VectorPotentialSolver(mesh, iron_domains='iron', mu_r=1000.0, order=2)
+solver_A.set_source_from_radia(coil)
+solver_A.solve_hysteresis(mat_factory, alpha=500.0, relax=0.5)
+
+# Scalar potential (Simkin) -- also supported but less accurate for B-input
+# H = H_s - grad(phi) has cancellation that degrades B accuracy
+solver_S = ScalarPotentialSolver(mesh, iron_domains='iron', order=2,
+                                  kelvin_region='kelvin', kelvin_radius=R)
+solver_S.set_source_from_radia(coil)
+solver_S.solve_hysteresis(mat_factory, alpha=500.0, relax=0.5)
+```
+
+### Key Implementation Details
+
+- Per-element material handles are **persistent** across time steps
+  (stored in `solver._hys_handles`). Do NOT call `rad.UtiDelAll()` between steps.
+- States saved/restored each Hantila iteration via `MatHysSaveState/RestoreState`
+- States committed on convergence via `MatHysCommitState` (next step starts from here)
+- `mat_factory` is called only on first invocation; subsequent calls reuse handles
+- AC loop: same solver instance, update source with `set_source_from_radia(new_coil)`
+
+### Verified Results (C-type Electromagnet, NI=20000, Energy Play K=10)
+
+- Simkin Hantila: Bz = -729 mT
+- A_r Hantila: Bz = -741 mT
+- Agreement: 1.6%
+
+### FEM -> Radia Analytical Field (Beam Tracking)
+
+After hysteresis solve, export M to Radia for exact gap field:
+```python
+combined = solver.to_radia(coil=coil)       # iron M + coil
+B = rad.Fld(combined, 'b', gap_points)       # exact analytical B
+```
+- `solver.get_M_per_element()` -> {el_nr: [Mx,My,Mz]}
+- `solver.to_radia(coil)` -> Radia container (ObjCnt of iron + coil)
+- No mesh needed in gap; surface charge formulas exact for constant M
+
+---
+
+## Unified Pipeline: Measurement -> B-input Energy Model -> Solver
+
+| Layer | Component | Role |
+|-------|-----------|------|
+| **Identification** | B-input Play fitting (Taka's Fourier separation) | Measured B-H -> f_k, eta_k |
+| **Model** | Energy-based approximation of B-input Play | f_k -> U_k, eta_k -> chi_k |
+| **Solver** | BEM or FEM | Inverse(H->B) or Forward(B->H) |
+
+### Layer 1: Parameter Identification (B-input Play Fitting)
+
+Measured B-H loops -> B-input Play parameters:
+- eta_k: play thresholds in B-space
+- f_k: shape functions (B-input, not H-input!)
+
+Optional: Taka's Fourier separation for dynamic components:
+```
+h = (a_i * db/dt) + (c_i * b)
+c_i -> static (B-input shape functions)
+a_i -> dynamic (eddy current + aftereffect)
+```
+
+### Layer 2: Energy-Based Approximation
+
+Convert B-input Play parameters to energy model:
+- U_k(r) = integral f_k(s) ds  (f_k = U_k')
+- chi_k = eta_k
+- G* = sum [U_k + chi_k |J_k - J_{k,p}|_eps - <H, J_k>]
+
+This approximation preserves B-input Play's physics (congruency, measurement
+agreement) while enabling efficient computation in both directions.
+
+### Layer 3: Field Solver
+
+- **BEM standard**: Inverse(H->B), each J_k independent
+- **BEM Newton**: Forward(B->H) for vector-accurate M + analytical Jacobian
+- **BEM Hantila**: Inverse(H->B) for R update (cheap)
+- **FEM Hantila**: Inverse(H->B) via MatMvsH()
+- **A-formulation**: Forward(B->H) directly (B known), but FEM Hantila sufficient
+
+---
+
 ## Future: Magnetic Aftereffect (磁気余効)
 
-The Sugahara laboratory (Kindai University) plans to extend the energy-based
-hysteresis model to include **magnetic aftereffect** (magnetic viscosity).
+**Status**: Planned. Not yet implemented.
 
-Magnetic aftereffect is the time-dependent relaxation of magnetization after
-a change in applied field -- distinct from eddy current effects. It originates
-from thermal activation over pinning energy barriers.
-
-**Physics**: After a field change, M(t) relaxes logarithmically:
-```
-M(t) = M_0 + S * ln(t / t_0)
-```
-where S is the magnetic viscosity coefficient.
-
-**Energy-based formulation**: The pinning potential U_k naturally provides
-the energy barrier landscape. Thermal activation (Arrhenius-type rate) over
-these barriers gives time-dependent J_k evolution:
+The energy-based model will be extended with thermal activation over pinning
+energy barriers (Arrhenius-type rate) for time-dependent magnetization:
 ```
 dJ_k/dt ~ exp(-Delta_U_k / (k_B * T))
 ```
 
-This will enable:
-- Post-magnetization relaxation analysis (着磁後の緩和)
-- Long-term stability prediction of permanent magnets (経年減磁予測)
-- Temperature-dependent demagnetization modeling (温度減磁)
-
-**Status**: Planned. Not yet implemented.
+Applications: post-magnetization relaxation, long-term PM stability, temperature
+demagnetization. See `docs/MAGNETIC_AFTEREFFECT_RESEARCH.md`.
 
 ---
 
 ## References
 
 - Egger et al., "Efficient inverse operator for energy-based vector hysteresis",
-  IEEE Trans. Magn. (MAGCON-25-07-0171)
+  IEEE Trans. Magn. (MAGCON-25-07-0171) [energy framework, Forward/Inverse naming]
 - Francois-Lavet et al., "An energy-based variational model of ferromagnetic
   hysteresis for finite element computations", J. Comp. Appl. Math., 2013
 - Matsuo, "Magnetization process and B-input play model", IEEE Trans. Magn., 2011
+- Hantila, F.I., "A method for solving stationary magnetic field in nonlinear media",
+  Rev. Roum. Sci. Techn. - Electrotechn. et Energ., 1975
+- Taka Enki et al., "Proposal of Iron Loss Calculation Formula for PWM Excitation",
+  IEEJ SA-26-005, 2026
+- Sugahara, K. and Hane, H., "B-input energy-based vector hysteresis",
+  Kindai University, ongoing research [B-input vs H-input, measurement congruency]
 """
 
+
+RADIA_ESIM = """
+# ESIM (Effective Surface Impedance Method)
+
+ESIM computes frequency- and H-dependent surface impedance Zs(H, omega)
+for nonlinear magnetic conductors by solving a 1D cell problem.
+
+## Physics
+
+Standard SIBC uses constant Zs = (1+j)/(sigma*delta) (linear mu).
+ESIM solves the 1D penetration problem with nonlinear mu(H):
+
+```
+rho * d^2H/dz^2 + j*omega*mu(|H|)*H = 0
+H(0) = H0 (surface), H(inf) = 0 (bulk)
+```
+
+This yields Zs(H0) = E(0)/H0 which depends on the surface field amplitude.
+
+## Solvers
+
+| Solver | Domain | Use Case |
+|--------|--------|----------|
+| `ESIMCellProblemSolver` | Semi-infinite | Thick conductors (delta << thickness) |
+| `ESIMFiniteSlabSolver` | Finite slab [0, a] | Transition region (delta ~ thickness) |
+
+## Quick Start
+
+```python
+from radia import generate_esi_table_from_bh_curve, ESITable
+
+# BH curve: [[H(A/m), B(T)], ...]
+bh_curve = [[0, 0], [100, 0.5], [500, 1.2], [2000, 1.5], [50000, 2.0]]
+
+# Generate ESI table for steel workpiece
+esi_table = generate_esi_table_from_bh_curve(
+    bh_curve, sigma=5e6, frequency=10000, n_points=50
+)
+
+# Query at specific surface H
+Zs = esi_table.get_impedance(H0=1000)           # complex [Ohm]
+P_loss, Q_react = esi_table.get_power_loss(1000) # W/m^2, var/m^2
+
+# Save/load
+esi_table.save('steel_10kHz.esi')
+esi_table = ESITable.load('steel_10kHz.esi')
+```
+
+## Finite Slab (Thin Conductors)
+
+For conductors where delta ~ thickness, use `ESIMFiniteSlabSolver`:
+
+```python
+from radia.esim_cell_problem import ESIMFiniteSlabSolver
+
+solver = ESIMFiniteSlabSolver(
+    half_thickness=0.005,   # 5mm half-thickness [m]
+    bh_curve=bh_curve,
+    sigma=5e6,              # [S/m]
+    frequency=10000         # [Hz]
+)
+result = solver.solve(H0=1000)
+# result['Z']: surface impedance with coth(gamma*t) correction
+# result['R_ac_over_R_dc']: AC/DC resistance ratio
+# result['H_profile']: H(z) depth profile
+```
+
+## Complex Permeability
+
+ESIM supports complex mu = mu' - j*mu" for magnetic losses
+(hysteresis loss, grain-boundary eddy currents):
+
+```python
+# Constant complex permeability
+solver = ESIMCellProblemSolver(
+    complex_mu=(500, 50),  # mu'_r=500, mu"_r=50
+    sigma=5e6, frequency=10000
+)
+
+# H-dependent complex permeability
+complex_mu_data = [
+    [100, 800, 30],   # [H(A/m), mu'_r, mu"_r]
+    [1000, 500, 50],
+    [5000, 200, 20],
+]
+solver = ESIMCellProblemSolver(
+    complex_mu=complex_mu_data,
+    sigma=5e6, frequency=10000
+)
+```
+
+## Usage Contexts
+
+### 1. PEEC Conductor Impedance (Radia)
+
+ESIMCoupledSolver uses ESI tables for PEEC conductor impedance:
+```python
+from radia.esim_coupled_solver import ESIMCoupledSolver
+solver = ESIMCoupledSolver(topology, bh_curve, sigma, freq)
+Z_port = solver.compute_port_impedance()
+```
+
+### 2. NGSolve FEM Robin BC
+
+ESIM's Zs(H) can be used as a nonlinear Robin BC in NGSolve A-Phi
+formulation (see ngsolve_usage topic "darwin" for details):
+```python
+a += (1/Zs_cf) * A.Trace() * N.Trace() * ds("workpiece")  # Robin BC
+# Picard iteration updates Zs from ESI table at each step
+```
+
+### 3. BEM + SIBC Shield (ShieldBEMSIBC)
+
+For conducting shields with ngbem BEM:
+```python
+from radia.ngbem_eddy import ShieldBEMSIBC
+shield = ShieldBEMSIBC(mesh, sigma=3.7e7, mu_r=1.0)
+```
+
+## Linear vs ESIM Comparison
+
+| Property | Linear SIBC | ESIM |
+|----------|-------------|------|
+| mu_r | Constant | H-dependent (B-H curve) |
+| Zs | `(1+j)/(sigma*delta)` | Numerical 1D solve |
+| Complex mu | No | Yes (mu' - j*mu") |
+| Solver | One-shot | Picard iteration |
+| Best for | Cu, Al | Steel, iron, ferrite |
+
+## Key Files
+
+| File | Class/Function | Purpose |
+|------|---------------|---------|
+| `esim_cell_problem.py` | `ESIMCellProblemSolver` | Semi-infinite 1D solver |
+| `esim_cell_problem.py` | `ESIMFiniteSlabSolver` | Finite thickness solver |
+| `esim_cell_problem.py` | `ESITable` | Zs(H) lookup with interpolation |
+| `esim_cell_problem.py` | `generate_esi_table_from_bh_curve()` | Main entry point |
+| `esim_coupled_solver.py` | `ESIMCoupledSolver` | PEEC + ESIM coupled solver |
+| `esim_workpiece.py` | `ESIMWorkpiece` | 3D workpiece with ESI tables |
+| `esim_vtk_export.py` | `ESIMVTKOutput` | VTK visualization |
+"""
 
 RADIA_BUILD_AND_RELEASE = """
 # Build, Release, and PyPI Publishing
@@ -2486,8 +3246,10 @@ def get_radia_documentation(topic: str = "all") -> str:
         "efie_preconditioner": RADIA_EFIE_PRECONDITIONER,
         "fem_verification": RADIA_FEM_VERIFICATION,
         "scalar_potential": RADIA_SCALAR_POTENTIAL,
+        "vector_potential": RADIA_VECTOR_POTENTIAL,
         "play_models": RADIA_PLAY_MODELS,
         "hysteresis": RADIA_HYSTERESIS,
+        "esim": RADIA_ESIM,
         "build_and_release": RADIA_BUILD_AND_RELEASE,
     }
 
