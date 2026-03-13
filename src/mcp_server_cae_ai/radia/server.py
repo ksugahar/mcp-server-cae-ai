@@ -2,9 +2,8 @@
 Radia Project MCP Server
 
 Provides tools for:
-- Linting Python scripts against Radia conventions (17 rules)
+- Linting Python scripts against Radia conventions
 - Radia BEM library usage documentation
-- GmshBuilder mesh generation API documentation (719 methods, 15 topics incl. CFD techniques)
 - md2html converter documentation (MathJax, reference links, styled HTML)
 
 NGSolve FEM documentation is in the separate mcp-server-ngsolve.
@@ -25,7 +24,6 @@ from mcp.server.fastmcp import FastMCP
 from .rules import ALL_RULES
 from .radia_knowledge import get_radia_documentation
 from .md2html_knowledge import get_md2html_documentation
-from .gmsh_builder_knowledge import get_gmsh_builder_documentation
 
 # Create MCP server
 mcp = FastMCP("radia-lint")
@@ -80,14 +78,10 @@ def lint_radia_script(filepath: str) -> str:
     - Removed rad.FldUnits() call present (HIGH)
     - Removed FldBatch/FldA/FldPhi (HIGH)
     - Removed old solver APIs (HIGH)
-    - GmshBuilder not used as context manager (HIGH)
-    - GmshBuilder old cubit_mesh import (HIGH)
     - PEEC n_seg too low for circular coil coupling (MODERATE)
     - Classical EFIE 1/kappa^2 low-frequency breakdown (MODERATE)
     - PEEC P/(jw) low-frequency breakdown (HIGH)
     - Docstrings hardcoding "in mm" (MODERATE)
-    - GmshBuilder generate without mesh size (MODERATE)
-    - GmshBuilder missing fragment (MODERATE)
     - Outdated build/Release path imports (LOW)
 
     Args:
@@ -308,42 +302,6 @@ def get_radia_lint_rules() -> str:
             ),
             'fix': 'Use stabilized EFIE: [A_k, Q_k; Q_k^T, kappa^2*V_k].',
         },
-        # GmshBuilder rules
-        {
-            'rule': 'gmsh-builder-no-context-manager',
-            'severity': 'HIGH',
-            'description': (
-                'GmshBuilder must be used as a context manager (with statement) '
-                'to ensure GMSH is properly initialized and finalized.'
-            ),
-            'fix': 'Use: with GmshBuilder() as gb: ...',
-        },
-        {
-            'rule': 'gmsh-builder-old-cubit-import',
-            'severity': 'HIGH',
-            'description': (
-                'cubit_mesh / CubitMesh has been renamed to gmsh_builder / GmshBuilder.'
-            ),
-            'fix': 'Use: from radia.gmsh_builder import GmshBuilder',
-        },
-        {
-            'rule': 'gmsh-builder-no-mesh-size',
-            'severity': 'MODERATE',
-            'description': (
-                'generate() called without set_mesh_size() or set_divisions(). '
-                'GMSH uses default sizing which may produce poor quality mesh.'
-            ),
-            'fix': 'Add gb.set_mesh_size(0.005) before gb.generate().',
-        },
-        {
-            'rule': 'gmsh-builder-missing-fragment',
-            'severity': 'MODERATE',
-            'description': (
-                'Multiple geometries exported to Radia without fragment(). '
-                'Volumes must share interfaces via fragment() for correct BEM assembly.'
-            ),
-            'fix': 'Use gb.fragment(vol_ids) before meshing multi-body assemblies.',
-        },
     ]
 
     lines = ["Radia Lint Rules", "=" * 50, ""]
@@ -374,7 +332,7 @@ def radia_usage(topic: str = "all") -> str:
             "solving"             - Solver usage (rad.Solve, method selection)
             "parallelization"     - NGSolve TaskManager parallelization
             "fields"              - Field computation (rad.Fld, FldLst, FldInt)
-            "mesh_import"         - NGSolve/GMSH/Cubit mesh import
+            "mesh_import"         - NGSolve/Cubit mesh import
             "best_practices"      - Common patterns and pitfalls
             "peec"                - PEEC conductor analysis (FastHenry, topology, SIBC)
             "ngbem_peec"          - PEEC with ngbem: Loop-Star, shield BEM+SIBC, stabilized EFIE
@@ -414,38 +372,6 @@ def md2html_usage(topic: str = "all") -> str:
             "tips"           - LaTeX math patterns, troubleshooting
     """
     return get_md2html_documentation(topic)
-
-
-@mcp.tool()
-def gmsh_builder_usage(topic: str = "all") -> str:
-    """
-    Get GmshBuilder mesh generation API documentation.
-
-    GmshBuilder is a high-level wrapper around GMSH's OCC (OpenCASCADE)
-    kernel, providing ~719 methods for geometry creation, boolean ops,
-    mesh control, mesh generation, quality evaluation, and export.
-    Part of the Radia project: from radia.gmsh_builder import GmshBuilder
-
-    Args:
-        topic: Documentation topic. Options:
-            "all"              - Complete documentation
-            "overview"         - Library overview, modules, quick start
-            "geometry"         - Geometry creation (80 methods: box, cylinder, sphere, etc.)
-            "boolean"          - Boolean operations (29 methods: fuse, cut, webcut, etc.)
-            "transforms"       - Transforms (26 methods: translate, rotate, mirror, array)
-            "mesh_control"     - Mesh control (75 methods: size, fields, transfinite, etc.)
-            "generation"       - Mesh generation (48 methods: generate, refine, optimize)
-            "quality"          - Mesh quality (27 methods: Jacobian, aspect ratio, etc.)
-            "mesh_access"      - Mesh access (75 methods: nodes, elements, Jacobian, basis)
-            "physical_groups"  - Physical groups (59 methods: blocks, sidesets, materials)
-            "export"           - Export (29 methods: msh, step, vtk, Radia, NGSolve)
-            "entity_wrappers"  - Entity queries (55 methods: volume/surface/curve/vertex)
-            "advanced"         - Advanced features (110 methods: analysis, groups, views, options)
-            "recipes"          - Practical recipes (C-magnet hex, coil, multi-material)
-            "best_practices"   - Best practices and common pitfalls
-            "cfd_techniques"   - CFD meshing techniques (BL, airfoil, wake, terrain, field composition)
-    """
-    return get_gmsh_builder_documentation(topic)
 
 
 # ============================================================
@@ -490,7 +416,7 @@ def ngsolve_radia_workflow(geometry: str) -> str:
     return (
         f"Set up an NGSolve -> Radia open boundary field evaluation workflow for: {geometry}\n\n"
         "## Workflow A: NGSolve FEM -> Radia Open Boundary\n"
-        "1. Create/import geometry in NGSolve (OCC or GMSH)\n"
+        "1. Create/import geometry in NGSolve (OCC) or Cubit (hex)\n"
         "2. Set up FEM solve (H1/HCurl/HDiv as appropriate)\n"
         "3. Solve for magnetization M per element\n"
         "4. Convert mesh to Radia objects: netgen_mesh_to_radia(mesh, material=...)\n"
@@ -701,34 +627,6 @@ def radia_play_model(scenario: str) -> str:
         "- ObjHexahedron: arbitrary hex (6 DOF, MSC) -- better accuracy\n"
         "- ObjTetrahedron: tet (3 DOF, MMM) -- unstructured meshes\n"
         "- For complex geometry: use netgen_mesh_to_radia() or gmsh_to_radia()\n"
-    )
-
-
-@mcp.prompt()
-def gmsh_builder_mesh(description: str) -> str:
-    """Create a mesh generation script using GmshBuilder."""
-    return (
-        f"Create a mesh generation script using GmshBuilder: {description}\n\n"
-        "## Instructions\n\n"
-        "1. Call `gmsh_builder_usage(topic='recipes')` for practical examples\n"
-        "2. Generate a complete, runnable Python script following these rules:\n"
-        "   - `from radia.gmsh_builder import GmshBuilder`\n"
-        "   - Use `with GmshBuilder(verbose=False) as gb:` context manager\n"
-        "   - All coordinates in meters\n"
-        "   - For hex mesh: use set_divisions() + generate('hex')\n"
-        "   - For tet mesh: use set_mesh_size() + generate('tet')\n"
-        "   - For multi-body: use gb.fragment(vol_ids) before meshing\n"
-        "   - For Radia: use gb.to_radia(mu_r=...) or gb.to_radia_with_materials()\n"
-        "   - For export: gb.export('output.msh')\n\n"
-        "## Hex Meshing Recipe\n\n"
-        "```python\n"
-        "with GmshBuilder(verbose=False) as gb:\n"
-        "    box = gb.add_box([0,0,0], [0.1, 0.02, 0.03])\n"
-        "    parts = gb.webcut_plane(box, 'x', 0.03)  # split for structured mesh\n"
-        "    gb.set_divisions_all(4, 3, 3)\n"
-        "    gb.generate('hex')\n"
-        "    radia_obj = gb.to_radia(mu_r=1000)\n"
-        "```\n"
     )
 
 

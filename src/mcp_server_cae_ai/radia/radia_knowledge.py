@@ -170,6 +170,37 @@ mat = rad.MatStd('Xc06')    # Low-carbon steel
 rad.MatApl(obj, mat)
 ```
 
+## Hysteresis Materials
+
+### Play Model (Recommended)
+
+```python
+from radia.hysteresis_io import hys_to_play_radia
+
+# One-step from JMAG .hys file
+K, eta, f_k_tables = hys_to_play_radia('material.hys', K=20)
+mat = rad.MatPlayHysteresis(K, eta, f_k_tables)
+rad.MatApl(iron, mat)
+```
+
+### Energy Model (Legacy)
+
+```python
+from radia.hysteresis_io import hys_to_radia
+
+params = hys_to_radia('material.hys', K=20, eps=1e-8)
+mat = rad.MatEnergyHysteresis(**params)
+rad.MatApl(iron, mat)
+```
+
+### State Management (Both Models)
+
+```python
+state = rad.MatHysSaveState(mat)       # Save play operator states
+rad.MatHysRestoreState(mat, state)     # Restore to saved state
+rad.MatHysCommitState(mat)             # Commit as new reference
+```
+
 ## Material Application
 
 ```python
@@ -256,21 +287,25 @@ rad.SolverConfig(
 config = rad.GetSolverConfig()
 ```
 
-## Vector-Accurate Hysteresis Solvers (Energy-Based Materials)
+## Vector-Accurate Hysteresis Solvers
 
-For **energy-based hysteresis materials** (`MatEnergyHysteresis`), Radia provides
+For **hysteresis materials** (`MatPlayHysteresis` or `MatEnergyHysteresis`), Radia provides
 specialized solvers that use **Forward(B->H)** instead of scalar chi for full
 vector magnetization accuracy.
+
+**Two hysteresis models:**
+- **Play model** (`MatPlayHysteresis`, Type 6, RECOMMENDED): Forward O(K) direct, analytical dH/dB
+- **Energy model** (`MatEnergyHysteresis`, Type 5): Forward via Schur complement, analytical dB/dH
 
 **Why Forward(B->H) for BEM?**
 - Standard chi-based BEM uses Inverse(H->B) -> scalar chi -> M = chi*H (M forced // H)
 - Vector-accurate solver uses Forward(B->H) -> H -> M = B/mu_0 - H (full vector M)
 - Forward(B->H) is the **natural direction for B-input Play** (B drives play operators)
-- Analytical Jacobian from `ComputeJacobian(dBdH)` (energy Hessian, not available in raw Play)
+- Analytical Jacobian from `ComputeJacobian(dBdH)`
 - Converges in **2-4 iterations** (vs 50+ for chi-based Picard)
 
 **Naming convention**: Code uses B-input Play naming. `Forward(B)` = B->H (natural),
-`Inverse(H)` = H->B (each J_k independent).
+`Inverse(H)` = H->B.
 
 ```python
 # Enable Newton with Forward for hysteresis problems
@@ -580,13 +615,13 @@ mat = rad.MatLin(1000)
 rad.MatApl(container, mat)
 ```
 
-## GMSH Import
+## .msh File Import (Cubit export)
 
 ```python
 from radia.gmsh_mesh_import import gmsh_to_radia
 
 container = gmsh_to_radia(
-    'mesh.msh',           # GMSH v2 ASCII format
+    'mesh.msh',           # GMSH v2/v4 ASCII format (from Cubit export)
     unit_scale=0.001,     # mm -> m conversion
     magnetization=[0, 0, 0]
 )
@@ -1834,27 +1869,11 @@ may need significant under-relaxation (relax=0.3-0.5) for stability.
 geometry. Linear results (mu_r=1000) are robust (~1% error even
 with rectangular poles). Always verify geometry against reference.
 
-### Pole Tip Geometry: Frustum with GmshBuilder
+### Pole Tip Geometry: Frustum via Cubit or Netgen OCC
 
-For tapered pole tips (truncated pyramid), use `add_thru_sections`:
-
-```python
-from radia.gmsh_builder import GmshBuilder
-
-with GmshBuilder(model_name='yoke') as gb:
-    # Main body: C-shape polygon extruded in X (poles end at Z=+-13mm)
-    main_vol = _extrude_polygon(gb, main_polygon_yz)
-
-    # Frustum pole tip: Z=-13mm to Z=-5mm, tapering in X and Y
-    # Base at Z=-13: [-25,25] x [-20,20] mm
-    # Tip  at Z=-5:  [-17,17] x [-12,12] mm (45-degree chamfer)
-    w_base = _make_rect_wire(gb, -0.025, 0.025, -0.020, 0.020, -0.013)
-    w_tip  = _make_rect_wire(gb, -0.017, 0.017, -0.012, 0.012, -0.005)
-    frustum = gb.add_thru_sections([w_base, w_tip], make_solid=True)
-
-    # Fuse main body + two frustum pole tips
-    yoke = gb.fuse([main_vol, frustum_bot, frustum_top])
-```
+For tapered pole tips (truncated pyramid), use Cubit journal files
+or NGSolve OCC WorkPlane with Loft operations. Do NOT use GMSH for
+mesh generation (GMSH is for visualization/post-processing only).
 
 ## Examples
 
@@ -2252,12 +2271,17 @@ rad.UtiDelAll()
 
 
 RADIA_HYSTERESIS = """
-# Magnetic Hysteresis: B-input Energy-Based Vector Hysteresis
+# Magnetic Hysteresis: B-input Play and Energy-Based Vector Hysteresis
 
-Radia supports **vector magnetic hysteresis** via an **energy-based model**
-that **approximates the B-input Play model** (Sugahara & Hane, Kindai University).
+Radia supports **vector magnetic hysteresis** via two C++ models:
+- **Play model** (`MatPlayHysteresis`, Type 6, **RECOMMENDED**): Direct B-input Play
+  operators in C++. Forward O(K) direct evaluation, no Newton. 4-9 us/eval.
+- **Energy model** (`MatEnergyHysteresis`, Type 5): Energy-based approximation of
+  B-input Play. Requires non-negative shape functions (f_k >= 0).
+
 The measured B-H loop data (JMAG .hys files, MATLAB .mat files) is fitted
-using B-input Play, then converted to energy parameters for the C++ solver.
+using B-input Play, then used directly (Play model) or converted to energy
+parameters (Energy model) for the C++ solver.
 
 ## Why B-input Play (Reference Model)
 
@@ -2276,10 +2300,32 @@ is the **physically correct** choice:
 | Natural direction | **B -> H** | H -> B |
 | H-axis congruency | **Reproduced** (matches measurement) | **Not reproduced** |
 
-## Energy-Based Approximation (Forward Model)
+## C++ Play Model (MatPlayHysteresis, RECOMMENDED)
 
-The energy-based model is constructed to **approximate B-input Play** while
-providing efficient H -> B computation for BEM:
+Direct B-input Play operators implemented in C++ (`radTPlayHysteresisMaterial`, Type 6):
+
+**Forward (B -> H)**: O(K) direct evaluation, no Newton needed.
+```
+p_k = play(B, eta_k, p_k_prev)     -- play operator with threshold eta_k
+H = sum f_k(|p_k|) * (p_k / |p_k|) -- constitutive relation
+dH/dB computed analytically (chain rule through play operators)
+```
+
+**Inverse (H -> B)**: Newton iteration with analytical Jacobian.
+```
+Newton: F(B) = Forward(B) - H_target = 0
+dB = -inv(dH/dB) * F(B)            -- 3x3 matrix inversion O(1)
+```
+
+**Key advantage**: Shape functions f_k can be **negative** (no sign constraint).
+JMAG data typically has negative f_k for k>0, which is required for physical
+coercivity but incompatible with the Energy model's convex U_k requirement.
+
+**Performance**: Forward 4-9 us/eval, Inverse 10-47 us/eval (11x faster than Energy).
+
+## Energy-Based Approximation (MatEnergyHysteresis, Legacy)
+
+The energy-based model approximates B-input Play using convex energy minimization:
 
 **Derivation from B-input Play parameters**:
 1. U_k(r) = integral f_k(s) ds  (key identity: **U_k' = f_k**, same shape functions)
@@ -2287,32 +2333,28 @@ providing efficient H -> B computation for BEM:
 3. |x| -> |x|_eps  (regularization for smoothness)
 4. G* = sum [U_k(|J_k|) - <H, J_k> + chi_k |J_k - J_{k,p}|_eps]
 
-The **Forward model** minimizes G* per J_k independently:
-```
-J_k = argmin_J [ U_k(|J|) - <H, J> + chi_k |J - J_{k,p}|_eps ]
-B = mu_0 * H + sum J_k
-```
-Each J_k is independent, O(K), **no special processing needed**.
+**Limitation**: Requires f_k >= 0 (convex U_k). Real JMAG data has negative f_k,
+making energy conversion mathematically impossible for most materials.
+Use `MatPlayHysteresis` instead.
 
 **Naming convention** (B-input Play naming):
-- `Forward(B)` = B -> H: natural direction for B-input Play, Schur complement O(K)
-- `Inverse(H)` = H -> B: each J_k independent, O(K), no Schur needed
-
-For Forward, Egger's Schur complement is referenced mathematically, but the
-**physical correctness** comes from B-input parameterization (congruency).
+- `Forward(B)` = B -> H: Schur complement O(K) (Egger's method)
+- `Inverse(H)` = H -> B: each J_k independent minimization, O(K)
 
 ## Formulation Compatibility
 
-| Field Formulation | Primary Variable | Operator | Processing |
-|-------------------|-----------------|----------|------------|
-| **A-formulation** (FEM) | B = curl(A) | Forward(B->H) | Schur O(K) |
-| **BEM standard** (Radia) | H | Inverse(H->B) | **None** (each J_k indep.) |
-| **Hantila BEM** | H | Inverse(H->B) | **None** |
-| **Newton BEM** (vector M) | M -> B | Forward(B->H) | Schur O(K) |
+| Field Formulation | Primary Variable | Operator | Play Model | Energy Model |
+|-------------------|-----------------|----------|------------|--------------|
+| **A-formulation** (FEM) | B = curl(A) | Forward(B->H) | **Direct O(K)** | Schur O(K) |
+| **BEM standard** (Radia) | H | Inverse(H->B) | Newton + analytical J | Each J_k indep. |
+| **Hantila BEM** | H | Inverse(H->B) | Newton + analytical J | Each J_k indep. |
+| **Newton BEM** (vector M) | M -> B | Forward(B->H) | **Direct O(K)** | Schur O(K) |
 
 ---
 
 ## Data Pipeline
+
+### Play Model (Recommended)
 
 ```
 Measured B-H loops
@@ -2321,29 +2363,48 @@ Measured B-H loops
 .hys file (JMAG)  or  .mat file (MATLAB/Potter-Schmulian)
   |
   v
-hysteresis_io.load_hys() / load_mat()    -> list of {B, H, Bmax} loops
+hys_to_play_radia() / mat_to_play_radia()   -> (K, eta, f_k_tables)
   |
   v
-hysteresis_io.build_shape_functions()     -> eta (thresholds), f_k (shape funcs)
-  |
-  v
-hysteresis_io.convert_play_to_energy()    -> K, chi, f_k_tables
-  |
-  v
-rad.MatEnergyHysteresis(K, chi, f_k_tables, eps)   -> material handle
+rad.MatPlayHysteresis(K, eta, f_k_tables)    -> material handle
   |
   v
 rad.MatApl(iron_element, mat_handle)
 rad.Solve(container, tol, maxiter, method)
 ```
 
+### Energy Model (Legacy, requires f_k >= 0)
+
+```
+Measured B-H loops -> load_hys() -> build_shape_functions()
+  -> convert_play_to_energy() -> rad.MatEnergyHysteresis(K, chi, tables, eps)
+```
+
 ---
 
 ## API Reference
 
+### rad.MatPlayHysteresis(K, eta, f_k_tables) -- RECOMMENDED
+
+Create a B-input Play vector hysteresis material with table-based shape functions.
+
+**Parameters:**
+
+| Parameter | Type | Unit | Description |
+|-----------|------|------|-------------|
+| K | int | - | Number of play operators |
+| eta | array(K) | T | Play thresholds in B-space |
+| f_k_tables | list of (r, f) tuples | T, A/m | Shape function tables per operator |
+
+**Returns:** Material handle (int)
+
+**Shape function f_k(r):** tabulated at grid points r[i] (|p_k| values in Tesla)
+with function values f[i] (in A/m). **No sign constraint** -- f_k can be negative.
+Monotone limits automatically computed to ensure Newton convergence.
+
 ### rad.MatEnergyHysteresis(K, chi, f_k_tables, eps=1e-8)
 
-Create an energy-based vector hysteresis material with table-based shape functions.
+Create an energy-based vector hysteresis material (legacy, requires f_k >= 0).
 
 **Parameters:**
 
@@ -2356,48 +2417,41 @@ Create an energy-based vector hysteresis material with table-based shape functio
 
 **Returns:** Material handle (int)
 
-**Shape function f_k(r) = U_k'(r):** tabulated at grid points r[i] with values f[i].
-Internal energy U_k and derivative f_k' are precomputed via trapezoidal integration
-and finite differences.
-
 ### rad.MatMvsH(mat, component, H)
 
 Evaluate magnetization M at given H field (updates internal hysteresis state).
+Works with both Play and Energy models.
 
 ```python
 M = rad.MatMvsH(mat_handle, 'm', [Hx, Hy, Hz])
 # Returns [Mx, My, Mz] in A/m
 ```
 
+### State Management (Both Models)
+
+```python
+state = rad.MatHysSaveState(mat)       # Save play operator states (K*9 doubles)
+rad.MatHysRestoreState(mat, state)     # Restore to saved state
+rad.MatHysCommitState(mat)             # Commit current state as new reference
+```
+
 ---
 
 ## Usage Patterns
 
-### Pattern 1: Direct Table Specification
-
-For known shape functions (e.g., from B-input Play model fitting):
+### Pattern 1: From JMAG .hys File (Play Model, Recommended)
 
 ```python
 import radia as rad
-import numpy as np
+from radia.hysteresis_io import hys_to_play_radia
 
 rad.UtiDelAll()
 
-K = 10
-chi = np.linspace(0, 300, K)  # Pinning strengths [A/m]
-eps = 1e-8
+# One-step: .hys -> Play model parameters
+K, eta, f_k_tables = hys_to_play_radia('material.hys', K=20)
 
-# Build shape function tables (here from analytical formula for demo)
-tables = []
-for k in range(K):
-    r = np.linspace(0, 0.2, 200)  # |J| grid [0, J_sat]
-    f = 5000.0 * np.tan(np.pi/2 * r / 0.2)  # f_k(r) = U_k'(r)
-    f[-1] = f[-2] * 2  # avoid inf
-    tables.append((r, f))
+mat = rad.MatPlayHysteresis(K, eta, f_k_tables)
 
-mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
-
-# Apply to iron element
 iron = rad.ObjRecMag([0, 0, 0], [0.01, 0.01, 0.01], [0, 0, 0])
 rad.MatApl(iron, mat)
 
@@ -2410,39 +2464,19 @@ B = rad.Fld(container, 'b', [0.02, 0, 0])
 rad.UtiDelAll()
 ```
 
-### Pattern 2: From JMAG .hys File (One-Step)
+### Pattern 2: From MATLAB .mat File (Play Model)
 
 ```python
-import radia as rad
-from radia.hysteresis_io import hys_to_radia
+from radia.hysteresis_io import mat_to_play_radia
 
-rad.UtiDelAll()
-
-# One-step: .hys -> table-based energy parameters
-params = hys_to_radia('material.hys', K=20, eps=1e-8)
-# params = {'K': 20, 'chi': array, 'f_k_tables': [...], 'eps': 1e-8}
-
-mat = rad.MatEnergyHysteresis(**params)
-
-iron = rad.ObjRecMag([0, 0, 0], [0.01, 0.01, 0.01], [0, 0, 0])
-rad.MatApl(iron, mat)
-# ... solve and evaluate fields ...
-rad.UtiDelAll()
+K, eta, f_k_tables = mat_to_play_radia('B_input.mat')
+mat = rad.MatPlayHysteresis(K, eta, f_k_tables)
 ```
 
-### Pattern 3: From MATLAB .mat File (Potter-Schmulian Format)
+### Pattern 3: Step-by-Step (Custom Processing)
 
 ```python
-from radia.hysteresis_io import mat_to_radia
-
-params = mat_to_radia('B_input.mat', eps=1e-8)
-mat = rad.MatEnergyHysteresis(**params)
-```
-
-### Pattern 4: Step-by-Step (Custom Processing)
-
-```python
-from radia.hysteresis_io import load_hys, build_shape_functions, convert_play_to_energy
+from radia.hysteresis_io import load_hys, build_shape_functions
 
 # Step 1: Load B-H loop data
 loops = load_hys('material.hys')
@@ -2450,44 +2484,31 @@ loops = load_hys('material.hys')
 
 # Step 2: Build Play shape functions
 eta, f_k_tables, Bplay = build_shape_functions(loops)
-# eta = thresholds in B-space
+# eta = thresholds in B-space [Tesla]
 # f_k_tables = [(r_values, f_values), ...] per operator
 
-# Step 3: Convert to energy-based parameters
-energy_params = convert_play_to_energy(eta, f_k_tables)
-# energy_params = {'K': int, 'chi': array, 'f_k_tables': [...]}
-
-# Step 4: Create Radia material
-mat = rad.MatEnergyHysteresis(
-    energy_params['K'], energy_params['chi'],
-    energy_params['f_k_tables'], 1e-8
-)
+# Step 3: Create Radia material (Play model, direct)
+K = len(f_k_tables)
+mat = rad.MatPlayHysteresis(K, eta.tolist(), f_k_tables)
 ```
 
-### Pattern 5: B-H Loop Generation (Material Characterization)
+### Pattern 4: B-H Loop Generation (Material Characterization)
 
 Generate a B-H hysteresis loop to verify material behavior:
 
 ```python
 import radia as rad
 import numpy as np
+from radia.hysteresis_io import hys_to_play_radia
 
 MU_0 = 4e-7 * np.pi
-
 rad.UtiDelAll()
 
-K = 10
-chi = np.linspace(0, 300, K)
-tables = []
-for k in range(K):
-    r = np.linspace(0, 0.2, 200)
-    f = 5000.0 * np.tan(np.pi/2 * r / 0.2)
-    f[-1] = f[-2] * 2
-    tables.append((r, f))
-mat = rad.MatEnergyHysteresis(K, chi, tables, 1e-8)
+K, eta, tables = hys_to_play_radia('material.hys', K=20)
+mat = rad.MatPlayHysteresis(K, eta, tables)
 
 # Drive with sinusoidal H
-Hmax = 1000.0
+Hmax = 3000.0
 n_steps = 200
 t = np.linspace(0, 2 * np.pi, n_steps)
 H_drive = Hmax * np.sin(t)
@@ -2499,6 +2520,15 @@ for i, H_val in enumerate(H_drive):
 
 # B_values vs H_drive shows hysteresis loop
 # Ascending branch != descending branch (remanence, coercivity visible)
+```
+
+### Pattern 5: Energy Model (Legacy, for f_k >= 0 data only)
+
+```python
+from radia.hysteresis_io import hys_to_radia
+
+params = hys_to_radia('material.hys', K=20, eps=1e-8)
+mat = rad.MatEnergyHysteresis(**params)
 ```
 
 ---
@@ -2513,9 +2543,11 @@ Location: `src/radia/hysteresis_io.py`
 | `load_mat(filepath)` | .mat file path | loops, dB, BMax | MATLAB .mat reader (Potter-Schmulian) |
 | `build_shape_functions(loops, dB)` | B-H loops | eta, f_k_tables, Bplay | ShapeFunction.m port |
 | `play_hysteron(f_k, Bx, By, eta, px, py)` | shape funcs + B | Hx, Hy, px, py | PlayHysteron.m port (verification) |
+| **`hys_to_play_radia(filepath, K)`** | .hys path | **(K, eta, f_k_tables)** | **One-step .hys -> Play model** |
+| **`mat_to_play_radia(filepath)`** | .mat path | **(K, eta, f_k_tables)** | **One-step .mat -> Play model** |
 | `convert_play_to_energy(eta, f_k_tables)` | Play params | {K, chi, f_k_tables} | Play -> energy conversion |
-| `hys_to_radia(filepath, K, eps)` | .hys path | {K, chi, f_k_tables, eps} | One-step .hys -> Radia |
-| `mat_to_radia(filepath, eps)` | .mat path | {K, chi, f_k_tables, eps} | One-step .mat -> Radia |
+| `hys_to_radia(filepath, K, eps)` | .hys path | {K, chi, f_k_tables, eps} | One-step .hys -> Energy model |
+| `mat_to_radia(filepath, eps)` | .mat path | {K, chi, f_k_tables, eps} | One-step .mat -> Energy model |
 
 ### .hys File Format (JMAG)
 
@@ -2540,14 +2572,15 @@ MATLAB .mat file with variables:
 
 ## Mathematical Background
 
-### B-input Play Model (Reference)
+### B-input Play Model (C++ Implementation)
 
 ```
 p_k(B) = play operator with threshold eta_k in B-space
 H = sum_k f_k(|p_k|) * (p_k / |p_k|)
 ```
-- Natural direction: B -> H (direct)
-- H -> B: implicit (fminsearch needed)
+- Forward (B -> H): O(K) direct evaluation, analytical dH/dB via chain rule
+- Inverse (H -> B): Newton iteration with analytical Jacobian inv(dH/dB)
+- **No sign constraint on f_k** -- handles negative shape functions from JMAG data
 
 ### Energy-Based Approximation
 
@@ -2567,24 +2600,35 @@ H = nu_0 * (B - sum J_k)
 ```
 Schur complement (Egger's math), O(K). A-method, Newton BEM.
 
-**ComputeJacobian**: dB/dH = mu_0*I + sum H_k^{-1} from energy Hessian.
-Not available in raw B-input Play model -- key advantage of energy framework.
+**ComputeJacobian**: Energy model uses dB/dH = mu_0*I + sum H_k^{-1} from energy Hessian.
+Play model computes dH/dB analytically via chain rule, then inverts to get dB/dH.
+Both models provide analytical Jacobians for Newton convergence.
 
-### Key Identity: f_k = U_k'
+### Key Identity: f_k = U_k' (Energy Model Only)
 
 - B-input Play shape function f_k = energy derivative U_k'
 - B-input Play threshold eta_k = pinning strength chi_k
 - Approximation source: eps-regularization (|x| -> |x|_eps)
 - As eps -> 0: energy model converges to B-input Play
+- **Limitation**: requires f_k >= 0 for convex U_k. Use Play model for f_k < 0
 
 ### Parameter Guidelines
+
+**Play Model (MatPlayHysteresis):**
 
 | Parameter | Typical Range | Notes |
 |-----------|--------------|-------|
 | K | 5 - 50 | More = finer hysteresis resolution. K=10-20 typical |
-| As | 1000 - 50000 A/m | Controls initial susceptibility |
-| Js | 0.05 - 2.0 T | Saturation per partial polarization. sum(Js) ~ total Js |
-| chi | 0 - 1000 A/m | chi[0]=0 (reversible), increasing for irreversible |
+| eta | 0 - 1.5 T | Play thresholds in B-space. eta[0]=0 (reversible) |
+| f_k | any sign | Shape functions. Can be negative (JMAG data) |
+
+**Energy Model (MatEnergyHysteresis):**
+
+| Parameter | Typical Range | Notes |
+|-----------|--------------|-------|
+| K | 5 - 50 | Same as Play model |
+| chi | 0 - 1000 A/m | Pinning strength (= eta_k converted). chi[0]=0 |
+| f_k | **>= 0 only** | Must be non-negative for convex U_k |
 | eps | 1e-8 - 1e-6 | Regularization. Smaller = sharper corners |
 
 ---
@@ -2595,21 +2639,32 @@ Not available in raw B-input Play model -- key advantage of energy framework.
 2. **Forgetting state is cumulative**: `MatMvsH()` updates internal hysteresis state.
    Each call advances the magnetization history. Call order matters.
 3. **Using MatLin for hysteretic materials**: `MatLin(mu_r)` is for linear (non-hysteretic)
-   soft iron. Use `MatEnergyHysteresis()` for hysteresis.
-4. **Wrong K value**: Too few operators (K<5) gives poor loop shape. Too many (K>50)
+   soft iron. Use `MatPlayHysteresis()` (recommended) or `MatEnergyHysteresis()`.
+4. **Using Energy model with negative f_k**: JMAG data typically has f_k < 0 for k>0.
+   Energy model requires f_k >= 0. Use `MatPlayHysteresis()` instead (no sign constraint).
+5. **Wrong K value**: Too few operators (K<5) gives poor loop shape. Too many (K>50)
    adds cost with diminishing returns. K=10-20 is the sweet spot.
 
 ---
 
 ## Verification
 
+### Play Model (13 tests)
+
+Script: `examples/hysteresis/verify_cpp_play_model.py`
+
+Tests: Forward M(H) sanity (4 tests), C++ vs Python comparison, B-H loop generation,
+state Save/Restore, monotone limit enforcement, Jacobian numerical verification,
+solver integration, performance benchmarking.
+
+Pytest: `tests/test_hysteresis.py` (13 tests covering Play + Energy, state management,
+solver integration, monotone limits)
+
+### Energy Model
+
 Script: `examples/hysteresis/verify_cpp_hysteresis.py`
 
-Tests:
-1. Forward operator sanity (B output range, chi effective, direction alignment)
-2. B-H loop generation (ascending != descending, hysteresis width > 0.001 T)
-3. Solver integration (MatApl + Solve on ObjRecMag in background field)
-4. Performance (K=50 evaluation timing)
+Tests: Forward operator, B-H loop, solver integration, performance.
 
 ---
 
@@ -2627,7 +2682,7 @@ rad.UtiDelAll()
 
 # 1. Create unmagnetized PM element with hysteresis material
 pm = rad.ObjRecMag([0, 0, 0], [0.02, 0.02, 0.01], [0, 0, 0])  # M=0 initially
-mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
+mat = rad.MatPlayHysteresis(K, eta, tables)  # or MatEnergyHysteresis
 rad.MatApl(pm, mat)
 
 # 2. Apply strong magnetizing field (着磁パルス)
@@ -2641,8 +2696,8 @@ rad.Solve(container, 0.001, 100, 1)  # J_k states updated
 ```
 
 **Key insight**: With `MatLin(mu_r)`, removing the external field returns M to zero.
-With `MatEnergyHysteresis`, **residual magnetization persists** due to pinning --
-this is exactly the physics of magnetization.
+With `MatPlayHysteresis` (or `MatEnergyHysteresis`), **residual magnetization persists**
+due to pinning -- this is exactly the physics of magnetization.
 
 **Use cases**:
 - Multi-pole magnetization pattern analysis (着磁パターン)
@@ -2654,7 +2709,7 @@ this is exactly the physics of magnetization.
 
 ## BEM Solver Integration (C++)
 
-Radia's C++ BEM core provides two solver paths for energy-based hysteresis:
+Radia's C++ BEM core provides solver paths for both Play and Energy hysteresis models:
 
 ### Standard Path: Inverse(H->B) + Scalar Chi
 
@@ -2730,9 +2785,9 @@ MU_0 = 4e-7 * np.pi
 
 rad.UtiDelAll()
 
-# 1. Create tetrahedral iron with energy hysteresis material
+# 1. Create tetrahedral iron with hysteresis material
 iron = rad.ObjTetrahedron(tet_vertices, [0, 0, 0])
-mat = rad.MatEnergyHysteresis(K, chi, tables, eps)
+mat = rad.MatPlayHysteresis(K, eta, tables)  # or MatEnergyHysteresis
 rad.MatApl(iron, mat)
 
 # 2. Enable B-input Hantila solver
@@ -2756,8 +2811,8 @@ rad.UtiDelAll()
 |---------|---------------------|-------------------|----------------------|
 | Operator used | Inverse(H->B) | Forward(B->H) | Forward + Inverse |
 | M accuracy | Scalar chi (M // H) | **Full vector M** | **Full vector M** |
-| Materials | MatLin, MatSatIsoTab, MatEnergyHysteresis | MatEnergyHysteresis | MatEnergyHysteresis |
-| Jacobian | chi-based | **Analytical dJ/dB** | Analytical + Hantila |
+| Materials | MatLin, MatSatIsoTab, MatPlayHysteresis, MatEnergyHysteresis | MatPlayHysteresis, MatEnergyHysteresis | MatPlayHysteresis, MatEnergyHysteresis |
+| Jacobian | chi-based | **Analytical** | Analytical + Hantila |
 | Matrix factorization | Every iteration | Every iteration | **Once** (LU) |
 | Cost per iteration | O(N^3) | O(N^3) | **O(N^2)** |
 | Convergence | 5-50 (Picard) | **2-4** | **3-47** |
@@ -2767,7 +2822,7 @@ rad.UtiDelAll()
 
 ## FEM Solver Integration (Hantila Polarization Method)
 
-The energy-based model (Forward) integrates with NGSolve FEM solvers via
+Both Play and Energy hysteresis models integrate with NGSolve FEM solvers via
 **Hantila (1975) polarization method**. Both scalar and vector potential
 formulations are supported.
 
@@ -2802,8 +2857,13 @@ from radia.scalar_potential_solver import ScalarPotentialSolver
 from radia.vector_potential_solver import VectorPotentialSolver
 
 # Material factory (creates independent per-element handles)
+# Play model (recommended):
 def mat_factory():
-    return rad.MatEnergyHysteresis(K, chi, tables, eps)
+    return rad.MatPlayHysteresis(K, eta, tables)
+
+# Or Energy model (legacy):
+# def mat_factory():
+#     return rad.MatEnergyHysteresis(K, chi, tables, eps)
 
 # Vector potential (A_r) -- RECOMMENDED for B-input hysteresis
 # B = B_s + curl(A_r) is primary variable -> B directly available for Play operator
@@ -2847,12 +2907,13 @@ B = rad.Fld(combined, 'b', gap_points)       # exact analytical B
 
 ---
 
-## Unified Pipeline: Measurement -> B-input Energy Model -> Solver
+## Unified Pipeline: Measurement -> B-input Play/Energy Model -> Solver
 
 | Layer | Component | Role |
 |-------|-----------|------|
 | **Identification** | B-input Play fitting (Taka's Fourier separation) | Measured B-H -> f_k, eta_k |
-| **Model** | Energy-based approximation of B-input Play | f_k -> U_k, eta_k -> chi_k |
+| **Model (recommended)** | Direct B-input Play (`MatPlayHysteresis`) | f_k, eta_k used directly |
+| **Model (legacy)** | Energy approximation (`MatEnergyHysteresis`) | f_k -> U_k, eta_k -> chi_k |
 | **Solver** | BEM or FEM | Inverse(H->B) or Forward(B->H) |
 
 ### Layer 1: Parameter Identification (B-input Play Fitting)
@@ -2868,15 +2929,17 @@ c_i -> static (B-input shape functions)
 a_i -> dynamic (eddy current + aftereffect)
 ```
 
-### Layer 2: Energy-Based Approximation
+### Layer 2: C++ Model
 
-Convert B-input Play parameters to energy model:
+**Play model (recommended)**: Use B-input Play parameters directly.
+- `MatPlayHysteresis(K, eta, f_k_tables)` -- no conversion needed
+- f_k can be negative (required for JMAG data)
+
+**Energy model (legacy)**: Convert to energy approximation.
 - U_k(r) = integral f_k(s) ds  (f_k = U_k')
 - chi_k = eta_k
 - G* = sum [U_k + chi_k |J_k - J_{k,p}|_eps - <H, J_k>]
-
-This approximation preserves B-input Play's physics (congruency, measurement
-agreement) while enabling efficient computation in both directions.
+- Requires f_k >= 0 (mathematically impossible for most JMAG data)
 
 ### Layer 3: Field Solver
 
@@ -2892,7 +2955,7 @@ agreement) while enabling efficient computation in both directions.
 
 **Status**: Planned. Not yet implemented.
 
-The energy-based model will be extended with thermal activation over pinning
+The Play model will be extended with thermal activation over pinning
 energy barriers (Arrhenius-type rate) for time-dependent magnetization:
 ```
 dJ_k/dt ~ exp(-Delta_U_k / (k_B * T))

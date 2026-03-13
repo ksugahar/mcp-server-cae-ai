@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mcp-server-cae-ai"
 version = "1.6.0"
-description = "MCP servers for CAE: Radia magnetostatics + NGSolve FEM + Cubit/GMSH meshing + EQNEDT32 MTEF"
+description = "MCP servers for CAE: Radia magnetostatics + NGSolve FEM + Cubit meshing + EQNEDT32 MTEF"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -15,7 +15,7 @@ authors = [
 keywords = [
     "mcp", "model-context-protocol", "claude-code",
     "cae", "simulation", "electromagnetics",
-    "radia", "ngsolve", "ngbem", "cubit", "gmsh", "meshing",
+    "radia", "ngsolve", "ngbem", "cubit", "meshing",
     "magnetostatics", "fem", "bem", "peec", "lint",
     "eqnedt32", "mtef", "equation-editor", "latex",
 ]
@@ -39,7 +39,6 @@ dependencies = [
 mcp-server-radia = "mcp_server_cae_ai.radia.server:main"
 mcp-server-ngsolve = "mcp_server_cae_ai.ngsolve.server:main"
 mcp-server-cubit = "mcp_server_cae_ai.cubit.server:main"
-mcp-server-gmsh = "mcp_server_cae_ai.gmsh.server:main"
 mcp-server-eqnedt32 = "mcp_server_cae_ai.eqnedt32.server:main"
 
 [project.urls]
