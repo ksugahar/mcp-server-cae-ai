@@ -14,7 +14,7 @@ Provides AI coding assistants (Claude Code, Cursor, etc.) with domain knowledge 
 - **NGSolve / ngbem** -- FEM spaces, Maxwell formulations, Kelvin transform, BEM operators
 - **Coreform Cubit** -- Hex meshing, export workflows, Python scripting API
 - **Cubit-to-Netgen** -- High-order curving, SetGeomInfo, name-based workflows
-- **GMSH** -- Open-source meshing, OCC geometry, transfinite hex, Radia/NGSolve integration
+- **GMSH** -- Visualization and post-processing (.msh file format reader for Cubit exports)
 
 ## Installation
 
@@ -32,7 +32,6 @@ Requires Python 3.10+. The only dependency is `mcp>=1.0.0`.
 claude mcp add radia -- mcp-server-radia
 claude mcp add ngsolve -- mcp-server-ngsolve
 claude mcp add cubit -- mcp-server-cubit
-claude mcp add gmsh -- mcp-server-gmsh
 ```
 
 ### Project-level configuration (.mcp.json)
@@ -50,9 +49,6 @@ Add to your project root:
     },
     "cubit": {
       "command": "mcp-server-cubit"
-    },
-    "gmsh": {
-      "command": "mcp-server-gmsh"
     }
   }
 }
@@ -64,17 +60,16 @@ Inside Claude Code, run `/mcp` to confirm the servers are listed.
 
 ## Servers
 
-### mcp-server-radia (5 tools, 17 lint rules)
+### mcp-server-radia (4 tools, 13 lint rules)
 
-Domain knowledge for [Radia](https://github.com/ksugahar/Radia) magnetostatics, PEEC, and GmshBuilder.
+Domain knowledge for [Radia](https://github.com/ksugahar/Radia) magnetostatics and PEEC.
 
 | Tool | Description |
 |------|-------------|
 | `lint_radia_script` | Lint a Python script for Radia/PEEC violations |
 | `lint_radia_directory` | Lint all scripts in a directory |
-| `get_radia_lint_rules` | List all 17 lint rules with descriptions |
+| `get_radia_lint_rules` | List all 13 lint rules with descriptions |
 | `radia_usage` | Radia API docs (geometry, materials, PEEC, ngbem) |
-| `gmsh_builder_usage` | GmshBuilder 719-method mesh generation library |
 
 ### mcp-server-ngsolve (7 tools, 17 lint rules)
 
@@ -108,21 +103,6 @@ Domain knowledge for [Coreform Cubit](https://coreform.com/products/coreform-cub
 | `mesh_quality_guide` | Mesh quality checking & improvement |
 | `get_lint_rules` | List all 16 Cubit lint rules |
 | `troubleshooting_guide` | Debugging guidance |
-
-### mcp-server-gmsh (8 tools, 14 lint rules)
-
-Domain knowledge for [GMSH](https://gmsh.info/) open-source mesh generation.
-
-| Tool | Description |
-|------|-------------|
-| `gmsh_docs` | GMSH API docs (35 topics: api, scripting, workflows) |
-| `gmsh_code_example` | Ready-to-run GMSH examples (8 shapes/workflows) |
-| `gmsh_script_template` | Customizable script templates (5 workflows) |
-| `lint_gmsh_script` | Lint a GMSH Python script (14 rules) |
-| `lint_gmsh_directory` | Lint all scripts in a directory |
-| `get_gmsh_lint_rules` | List all 14 GMSH lint rules |
-| `gmsh_element_types` | GMSH element type code reference |
-| `gmsh_vs_cubit` | GMSH vs Cubit comparison guide |
 
 ## Knowledge Coverage
 
@@ -161,15 +141,6 @@ Domain knowledge for [GMSH](https://gmsh.info/) open-source mesh generation.
 - Mesh quality metrics and improvement
 - 600+ Python API functions documented
 
-### GMSH Meshing
-- OCC kernel: primitives, booleans, STEP/IGES import
-- Built-in kernel: bottom-up geometry (points, curves, surfaces)
-- Mesh size fields (Distance, Threshold, Min, MathEval)
-- Transfinite structured hex meshing
-- Physical groups for material/boundary assignment
-- Radia integration: gmsh_to_radia(), gmsh_surface_to_ngsolve()
-- NGSolve integration: ReadGmsh, high-order curving
-
 ### Cubit-to-Netgen High-Order Curving
 - SetGeomInfo API with UV parameter formulas
 - Name-based OCC workflows (noheal import)
@@ -190,7 +161,6 @@ pytest
 pytest tests/test_radia_rules.py -v    # 17 Radia rule tests
 pytest tests/test_ngsolve_rules.py -v  # 17 NGSolve rule tests
 pytest tests/test_cubit_rules.py -v    # 16 Cubit rule tests
-pytest tests/test_gmsh_rules.py -v     # 14 GMSH rule tests
 pytest tests/test_selftest.py -v       # Selftest + fixture validation
 ```
 
