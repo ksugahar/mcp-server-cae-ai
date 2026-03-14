@@ -527,23 +527,68 @@ GMRes(A=system, b=rhs, pre=pre, tol=1e-6, maxsteps=200)
 """
 
 NGSOLVE_BEM = """
-# Boundary Element Method in NGSolve (ngbem)
+# Boundary Element Method in NGSolve (ngsolve.bem)
 
 ## Overview
 
-ngbem provides Galerkin BEM operators integrated with NGSolve function spaces.
+**ngbem is bundled with NGSolve** (compiled into ngslib.pyd). It is NOT a separate
+package. Do NOT use `import ngbem` -- use `from ngsolve.bem import ...`.
+
+Developer: Lucy Weggler (https://weggler.github.io/ngbem/intro.html)
 
 ```python
+# CORRECT: ngbem is accessed via ngsolve.bem
 from ngsolve.bem import LaplaceSL, LaplaceDL, HelmholtzSL, HelmholtzDL
+
+# WRONG: ngbem is not a standalone package
+# import ngbem  # ImportError!
 ```
 
-## Available BEM Operators
+## Complete API (ngsolve.bem exports, 31 symbols)
+
+### Laplace Kernel (G = 1/(4*pi*r)) -- MQS/Darwin regime
+- `LaplaceSL` -- Single Layer potential (variational form)
+- `LaplaceDL` -- Double Layer potential (variational form)
+- `SingleLayerPotentialOperator` -- Legacy API, returns IntegralOperator
+- `DoubleLayerPotentialOperator` -- Legacy API
+- `HypersingularOperator` -- Legacy API
+
+### Helmholtz Kernel (G_k = e^{-jkr}/(4*pi*r)) -- Full wave
+- `HelmholtzSL` -- Single Layer (kappa parameter)
+- `HelmholtzDL` -- Double Layer (kappa parameter)
+
+### Maxwell Operators -- EFIE/MFIE
+- `MaxwellSingleLayerPotentialOperator`
+- `MaxwellDoubleLayerPotentialOperator`
+
+### Elasticity
+- `LameSL` -- Lame single layer for elasticity BEM
+
+### Evaluation & Utility
+- `BiotSavartCF` -- CoefficientFunction for Biot-Savart field evaluation
+- `PotentialOperator` -- Modern variational form wrapper
+- `IntegralOperator` -- Legacy operator wrapper
+
+### Two API Styles
+
+```python
+# Modern variational API (recommended):
+V = LaplaceSL(u*ds("surf")) * v*ds("surf")  # Returns PotentialOperator
+V.mat  # Access NGSolve BaseMatrix
+
+# Legacy API:
+slp = SingleLayerPotentialOperator(fes, intorder=3)
+slp.mat  # Dense matrix
+```
+
+## Available BEM Operators (Summary)
 
 | Operator | Function | Kernel |
 |----------|----------|--------|
 | Single Layer (V) | `LaplaceSL` / `HelmholtzSL` | G(r) or G_k(r) |
 | Double Layer (K) | `LaplaceDL` / `HelmholtzDL` | dG/dn |
 | Hypersingular (D) | Via curl of SL | d^2G/dn^2 |
+| Biot-Savart | `BiotSavartCF` | curl G(r) |
 
 ## Basic BEM Assembly
 
@@ -685,6 +730,71 @@ pre = invM @ (kappa*Vrot.mat - 1/kappa*surfcurl@invMH1@Vpot.mat@invMH1@surfcurl.
 # Solve with GMRES
 gfj.vec[:] = solvers.GMRes(A=lhs, b=rhs.vec, pre=pre, maxsteps=500, tol=1e-8)
 ```
+
+## BEM Inductance Extraction
+
+Self-inductance of a conductor loop via LaplaceSL on HDivSurface:
+
+```python
+import numpy as np
+from ngsolve import Mesh, HDivSurface, TaskManager, ds
+from ngsolve.bem import LaplaceSL
+
+MU_0 = 4.0 * np.pi * 1e-7
+
+# Surface mesh of conductor (torus, coil, etc.)
+mesh = ...  # NGSolve surface mesh
+fes = HDivSurface(mesh, order=0)  # RT0 edge DOFs
+j_trial, j_test = fes.TnT()
+
+label = list(set(mesh.GetBoundaries()))[0]  # or specific name
+
+# Assemble Laplace SL (MQS kernel: G = 1/(4*pi*r))
+with TaskManager():
+    L_op = LaplaceSL(j_trial.Trace()*ds(label)) * j_test.Trace()*ds(label)
+
+# Extract dense matrix and scale by mu_0
+n = fes.ndof
+L_mat = MU_0 * extract_dense(L_op.mat, n)
+
+# Total inductance with uniform excitation (order=0 only!)
+e = np.ones(n) / n
+L_total = 1.0 / (e @ np.linalg.solve(L_mat, e))
+```
+
+**IMPORTANT**: The `e = ones/n` uniform excitation is only valid for order=0 (RT0).
+For higher-order HDivSurface (order >= 1), project the current excitation properly.
+
+### Verified accuracy (circular loop, Neumann formula L = mu_0*R*(ln(8R/a) - 2)):
+- 89 elements, order=0, Curve(1): +16% error (very coarse mesh)
+- For < 5% error: use finer mesh (curvaturesafety >= 1.0) or higher order
+
+## Stabilized BEM for Low-Frequency (Weggler)
+
+Classical EFIE has O(kappa^{-2}) condition number blow-up. Lucy Weggler's stabilized
+formulation uses product space HDivSurface x SurfaceL2:
+
+```python
+# Stabilized block system: [A_k, Q_k; Q_k^T, k^2*V_k]
+# At k=0 (MQS): [A_0, Q_0; Q_0^T, 0] -> saddle point (pure L+R)
+
+from ngsolve import HDivSurface, SurfaceL2, ds
+from ngsolve.bem import LaplaceSL
+
+fes_J = HDivSurface(mesh, order=0)  # Current (loop)
+fes_rho = SurfaceL2(mesh, order=0)  # Charge (star)
+
+# Block (1,1): A_0 = LaplaceSL on HDivSurface
+A_0 = LaplaceSL(j_trial.Trace()*ds) * j_test.Trace()*ds
+
+# Block (1,2) / (2,1): Q_0 = coupling (div J -> rho)
+# Built via: BilinearForm(div(u.Trace()) * v_l2 * ds)
+
+# Block (2,2): k^2 * V_0 = scalar single layer (vanishes at k=0)
+V_0 = LaplaceSL(rho_trial*ds) * rho_test*ds
+```
+
+Reference: https://github.com/Weggler/docu-ngsbem/blob/main/demos/Maxwell_DtN_Stabilized.ipynb
 """
 
 NGSOLVE_MESH = """

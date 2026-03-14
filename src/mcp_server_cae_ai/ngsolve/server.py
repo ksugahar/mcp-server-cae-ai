@@ -4,6 +4,7 @@ NGSolve FEM MCP Server
 Provides tools for:
 - Linting Python scripts against NGSolve conventions (17 rules)
 - NGSolve FEM usage documentation (20 topics incl. EM formulations, material modeling)
+- ngsolve.bem (BEM operators: LaplaceSL/DL, HelmholtzSL/DL, Maxwell, BiotSavart)
 - ngsolve.la (Compact AMS/COCR/ICCG, formerly ngsolve-sparsesolv) solver documentation
 - Kelvin transformation reference for open boundary FEM
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
