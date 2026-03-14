@@ -787,9 +787,9 @@ For eddy current `K + jw*sigma*M`, the correct real auxiliary is:
 - `A_real = K + |omega*sigma|*M` (captures same scale)
 - Optionally add `+ eps*M` (eps ~ 1e-6) for IC regularization
 
-**Verified**: 44,056 DOFs, 30 kHz, sigma=1e6:
+**Verified** (uniform sigma, 2,839 DOFs, 30 kHz, sigma=1e6):
 - Wrong scaling (mass=1.0): 500 iterations, COCR does not converge
-- Correct scaling (mass=|omega*sigma|): **14 iterations**, relative error 7.5e-10
+- Correct scaling (mass=|omega*sigma|): **13 iterations**, relative error 2.15e-10
 
 ### Why a_real is needed
 
@@ -797,6 +797,45 @@ AMS auxiliary space corrections (G, Pi) operate on real arithmetic.
 Complex system matrix A = K + jw*sigma*M cannot be used directly.
 Real auxiliary matrix `A_real = K + |omega*sigma|*M` captures
 the same spectral structure without imaginary part.
+
+### Conductor-in-Air Problems: Mass Regularization Required
+
+When sigma is only in a subregion (conductor in air), the curl-curl system
+has a near-null space in the air region. This causes:
+- **COCR breakdown** at ~78 iterations (algorithm stalls, cannot reduce residual further)
+- **GMRES also stalls** (converges to a different null-space component)
+- Both solutions satisfy A*x = f (the difference is in the null space of A)
+
+**Fix**: Add mass regularization `eps * u * v * dx` to ALL domains:
+
+```python
+mu0 = 4e-7 * 3.14159265
+nu = 1.0 / mu0
+eps_reg = 0.05 * nu   # = 0.05/mu0, minimum for COCR convergence
+
+# Complex system (add eps to entire domain)
+a += nu * curl(u) * curl(v) * dx
+a += 1j * omega * sigma_cf * u * v * dx
+a += eps_reg * u * v * dx                   # regularization (all domains)
+
+# Real auxiliary (also add eps)
+a_real += nu * curl(u_r) * curl(v_r) * dx
+a_real += (abs(omega*sigma) + eps_reg) * u_r * v_r * dx
+```
+
+**Impact on physical solution** (B = curl(E)):
+
+| eps/nu | COCR iters | pardiso match | B field error |
+|--------|-----------|--------------|--------------|
+| 0 (none) | 78 (breakdown) | 96% diff (null space) | - |
+| 0.01 | 78 (breakdown) | 0.94% | - |
+| **0.05** | **117** | **1.0e-04** | **0.25%** |
+| 0.10 | 111 | 9.9e-05 | ~0.3% |
+| 1.00 | 121 | 9.7e-07 | 4.7% |
+
+- `eps=0.05*nu`: Best balance (B field error 0.25%, COCR converges)
+- The 96% "error" without regularization is gauge freedom (E differs, curl(E) is same)
+- Uniform sigma (all conducting): No regularization needed (COCR: 13 iters, 2e-10 error)
 
 ### NGSolve built-in HCurlAMG: Known Crash
 
@@ -911,25 +950,43 @@ For Hermitian systems, use CG with conjugate=True.
 
 SPARSESOLV_EXAMPLE_COMPACT_AMS = '''# Compact AMS + COCR for Complex Eddy Current
 # ComplexCompactAMSPreconditioner + COCRSolver (TaskManager parallel Re/Im)
+#
+# Two cases:
+#   Case A: Uniform sigma (all conducting) -> no regularization needed
+#   Case B: Conductor-in-air -> mass regularization required for COCR
 from ngsolve import *
 import sparsesolv_ngsolve as ssn
+import math
 
-# --- Problem setup (simplified eddy current) ---
-from netgen.occ import Box, Pnt
-box = Box(Pnt(0,0,0), Pnt(1,1,1))
-for f in box.faces: f.name = "outer"
-mesh = box.GenerateMesh(maxh=0.15)
+# --- Case B: Conductor-in-Air (common real-world setup) ---
+from netgen.occ import Box, Pnt, Glue
+conductor = Box(Pnt(0.3, 0.3, 0.3), Pnt(0.7, 0.7, 0.7))
+conductor.faces.name = "inner"
+air = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
+air.faces.name = "outer"
+shape = Glue([air - conductor, conductor])
+from netgen.occ import OCCGeometry
+mesh = Mesh(OCCGeometry(shape).GenerateMesh(maxh=0.15))
 
-omega = 2 * 3.14159265 * 50  # 50 Hz
-sigma = 5.96e7  # Cu conductivity
-nu = 1.0  # 1/mu_0 (simplified)
+freq = 30e3
+omega = 2 * math.pi * freq
+sigma_val = 1e6
+mu0 = 4e-7 * math.pi
+nu = 1.0 / mu0
+sigma_cf = mesh.MaterialCF({"inner": sigma_val}, default=0)
+
+# Mass regularization: required for conductor-in-air (COCR breakdown without it)
+# eps = 0.05*nu: B field error ~0.25%, COCR converges in ~117 iterations
+# eps = 0: COCR breaks down at ~78 iterations (null space in air region)
+eps_reg = 0.05 * nu
 
 # Complex HCurl space
 fes = HCurl(mesh, order=1, nograds=True, dirichlet="outer", complex=True)
 u, v = fes.TnT()
 a = BilinearForm(fes)
 a += nu * curl(u) * curl(v) * dx
-a += 1j * omega * sigma * u * v * dx
+a += 1j * omega * sigma_cf * u * v * dx
+a += eps_reg * u * v * dx                    # regularization (all domains)
 a.Assemble()
 
 f_vec = LinearForm(fes)
@@ -943,29 +1000,31 @@ fes_real = HCurl(mesh, order=1, nograds=True, dirichlet="outer", complex=False)
 u_r, v_r = fes_real.TnT()
 a_real = BilinearForm(fes_real)
 a_real += nu * curl(u_r) * curl(v_r) * dx
-a_real += abs(omega * sigma) * u_r * v_r * dx   # MUST match |omega*sigma| scale!
+a_real += (abs(omega * sigma_val) + eps_reg) * u_r * v_r * dx
 a_real.Assemble()
 
 # --- Discrete gradient + vertex coordinates ---
 G_mat, h1_fes = fes_real.CreateGradient()
-nv = mesh.nv
-cx = [mesh.ngmesh.Points()[i+1][0] for i in range(nv)]
-cy = [mesh.ngmesh.Points()[i+1][1] for i in range(nv)]
-cz = [mesh.ngmesh.Points()[i+1][2] for i in range(nv)]
+cx = [mesh[v].point[0] for v in mesh.vertices]
+cy = [mesh[v].point[1] for v in mesh.vertices]
+cz = [mesh[v].point[2] for v in mesh.vertices]
 
 # --- ComplexCompactAMSPreconditioner ---
 pre = ssn.ComplexCompactAMSPreconditioner(
     a_real.mat, G_mat, freedofs=fes_real.FreeDofs(),
-    coord_x=cx, coord_y=cy, coord_z=cz)
+    coord_x=cx, coord_y=cy, coord_z=cz,
+    ndof_complex=fes.ndof)
 
 # --- Solve with COCR (Compact AMS is symmetric -> COCR optimal) ---
-solver = ssn.COCRSolver(a.mat, pre, maxiter=500, tol=1e-8,
+solver = ssn.COCRSolver(a.mat, pre, maxiter=500, tol=1e-10,
                         freedofs=fes.FreeDofs())
 gfu = GridFunction(fes)
 with TaskManager():
     gfu.vec.data = solver * f_vec.vec
 
 print(f"COCR converged in {solver.iterations} iterations")
+# Expected: ~117 iterations for conductor-in-air with eps=0.05*nu
+# For uniform sigma (Case A): ~13 iterations, no regularization needed
 '''
 
 
