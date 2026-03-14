@@ -4,7 +4,7 @@ NGSolve FEM MCP Server
 Provides tools for:
 - Linting Python scripts against NGSolve conventions (17 rules)
 - NGSolve FEM usage documentation (20 topics incl. EM formulations, material modeling)
-- ngsolve-sparsesolv (Compact AMS/COCR/ICCG) solver documentation
+- ngsolve.la (Compact AMS/COCR/ICCG, formerly ngsolve-sparsesolv) solver documentation
 - Kelvin transformation reference for open boundary FEM
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
 
@@ -374,11 +374,10 @@ def ngsolve_usage(topic: str = "all") -> str:
 @mcp.tool()
 def sparsesolv(topic: str = "all") -> str:
     """
-    Get ngsolve-sparsesolv documentation and code examples.
+    Get sparsesolv documentation and code examples (now in ngsolve.la).
 
-    ngsolve-sparsesolv is a standalone pybind11 add-on module for NGSolve
-    that provides Compact AMS, Compact AMG, IC, SGS preconditioners with
-    COCR, CG, GMRES, ICCG, SGSMRTR solvers.
+    Since v3.1.0, sparsesolv types are unified into ngsolve.la module.
+    Import: from ngsolve.la import CompactAMSPreconditioner, COCRSolver, etc.
 
     Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 

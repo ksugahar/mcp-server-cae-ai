@@ -2,43 +2,44 @@
 ngsolve-sparsesolv knowledge base for MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 2.7.0
+Version: 3.1.0 (types unified into ngsolve.la)
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
-This module provides reference documentation for the ngsolve-sparsesolv library,
-a standalone pybind11 extension module that provides iterative solvers and
-preconditioners as an add-on to NGSolve.
+Since version 3.1.0, sparsesolv types are unified into the ngsolve.la module.
+Import: from ngsolve.la import CompactAMSPreconditioner, COCRSolver, etc.
+The standalone sparsesolv_ngsolve module is deprecated; use ngsolve.la directly.
 """
 
 SPARSESOLV_OVERVIEW = """
-# ngsolve-sparsesolv
+# ngsolve-sparsesolv (now in ngsolve.la)
 
 ## What It Is
 
-ngsolve-sparsesolv is a **standalone pybind11 extension module** that provides
-iterative solvers and preconditioners as an **add-on to NGSolve**. It is NOT
-a fork or patch of NGSolve itself -- it is an independent library that links
-against NGSolve at build time and produces a single `sparsesolv_ngsolve.pyd`
-(Windows) or `.so` (Linux/macOS) file.
+Since version 3.1.0, ngsolve-sparsesolv types are **unified into `ngsolve.la`**.
+All solvers and preconditioners are available directly via:
 
-**Key distinction from NGSolve built-in solvers:**
+```python
+from ngsolve.la import (
+    SparseSolvSolver, ICPreconditioner, SGSPreconditioner,
+    CompactAMSPreconditioner, ComplexCompactAMSPreconditioner,
+    CompactAMGPreconditioner, COCRSolver, GMRESSolver,
+)
+```
 
-| Aspect               | NGSolve Built-in           | ngsolve-sparsesolv                    |
-|----------------------|----------------------------|---------------------------------------|
-| Installation         | Comes with NGSolve         | Separate `pip install` or CMake build |
-| IC preconditioner    | Not available              | IC with auto-shift, diagonal scaling  |
-| SGS preconditioner   | Not as standalone          | Standalone SGS and SGS-MRTR           |
-| Complex support      | Via built-in solvers       | Conjugate/unconjugate inner product   |
-| Parallel tri-solve   | Not available for IC       | ABMC ordering + level scheduling      |
-| Custom DOF ordering  | Not available              | RCM bandwidth reduction               |
-| Divergence detection | Not available              | Stagnation-based early termination    |
+The standalone `sparsesolv_ngsolve` module is deprecated. Use `ngsolve.la` directly.
 
-**Positioning:** Complements NGSolve's built-in direct/iterative solvers with
-specialized preconditioners (IC, Compact AMS, Compact AMG) and convergence
-controls not available in the base NGSolve distribution. The Compact AMS
-preconditioner provides mesh-size independent iteration counts for HCurl
-eddy current problems with no external dependencies (header-only C++).
+**Key capabilities (now in ngsolve.la):**
+
+| Capability           | Description                                       |
+|----------------------|---------------------------------------------------|
+| IC preconditioner    | IC with auto-shift, diagonal scaling              |
+| SGS preconditioner   | Standalone SGS and SGS-MRTR                       |
+| Compact AMS          | HCurl auxiliary-space Maxwell (header-only, no HYPRE) |
+| Compact AMG          | Algebraic multigrid (PMIS + classical interp)     |
+| COCR solver          | Complex-symmetric short recurrence (3.5x vs GMRES)|
+| ABMC ordering        | Parallel triangular solve with level scheduling   |
+| Divergence detection | Stagnation-based early termination                |
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
@@ -46,7 +47,7 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 ## Architecture
 
 - **Header-only C++17 core**: `include/sparsesolv/` (no separate .cpp compilation)
-- **pybind11 Python bindings**: Single extension module `sparsesolv_ngsolve`
+- **Unified into ngsolve.la**: Types registered in NGSolve's `la` module via pybind11
 - **NGSolve integration**: Links against NGSolve's `SparseMatrix`, `BaseVector`,
   `BitArray`, `BilinearForm`, `FESpace` for seamless interop
 - **Parallel backend**: Compile-time dispatch to NGSolve TaskManager, OpenMP, or serial
@@ -95,8 +96,8 @@ SPARSESOLV_API = """
 ## Import
 
 ```python
-# Standalone add-on module (recommended)
-from sparsesolv_ngsolve import (
+# Since ngsolve-sparsesolv 3.1.0, all types are in ngsolve.la
+from ngsolve.la import (
     SparseSolvSolver,      # All-in-one solver factory
     ICPreconditioner,      # IC preconditioner for use with NGSolve CGSolver
     SGSPreconditioner,     # SGS preconditioner for use with NGSolve CGSolver
@@ -112,8 +113,7 @@ from sparsesolv_ngsolve import (
 )
 ```
 
-Note: `import ngsolve` must be called before `import sparsesolv_ngsolve`
-to ensure NGSolve shared libraries are loaded first.
+Note: `import ngsolve` is required before accessing `ngsolve.la` types.
 
 ## SparseSolvSolver
 
@@ -226,7 +226,7 @@ SPARSESOLV_EXAMPLES = """
 
 ```python
 from ngsolve import *
-from sparsesolv_ngsolve import SparseSolvSolver
+from ngsolve.la import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -342,7 +342,7 @@ result = solver.Solve(f.vec, gfu.vec)
 
 ```python
 from ngsolve.krylovspace import CGSolver
-from sparsesolv_ngsolve import ICPreconditioner
+from ngsolve.la import ICPreconditioner
 
 pre = ICPreconditioner(a.mat, freedofs=fes.FreeDofs(), shift=1.05)
 pre.Update()
@@ -524,16 +524,25 @@ Using the wrong setting causes divergence or extremely slow convergence
 """
 
 SPARSESOLV_BUILD = """
-# Build & Installation Instructions
+# Installation
 
-## Requirements
+## Since ngsolve-sparsesolv 3.1.0 (Recommended)
 
-- CMake 3.16+
-- C++17 compiler (MSVC 2022, GCC 10+, Clang 10+)
-- NGSolve installed (from source or pip) with CMake config files
-- pybind11 (fetched automatically by CMake if not found)
+Types are unified into `ngsolve.la`. No separate installation needed:
 
-## Step 1: Clone and Build
+```bash
+pip install ngsolve>=6.2.2601  # sparsesolv types included in ngsolve.la
+```
+
+Verify:
+
+```bash
+python -c "from ngsolve.la import SparseSolvSolver, CompactAMSPreconditioner; print('OK')"
+```
+
+## Building from source (development only)
+
+For development or custom builds:
 
 ```bash
 git clone https://github.com/ksugahar/ngsolve-sparsesolv.git
@@ -545,43 +554,13 @@ cmake .. -DSPARSESOLV_BUILD_NGSOLVE=ON \\
 cmake --build . --config Release
 ```
 
-Produces: `sparsesolv_ngsolve.pyd` (Windows) or `.so` (Linux/macOS)
-
-## Step 2: Install to Python Path
-
-```bash
-# Find NGSolve site-packages
-SITE_PACKAGES=$(python -c "import ngsolve, pathlib; print(pathlib.Path(ngsolve.__file__).parent.parent)")
-
-# Create package directory and copy
-mkdir -p "$SITE_PACKAGES/sparsesolv_ngsolve"
-cp build/Release/sparsesolv_ngsolve*.pyd "$SITE_PACKAGES/sparsesolv_ngsolve/"   # Windows
-# cp build/sparsesolv_ngsolve*.so "$SITE_PACKAGES/sparsesolv_ngsolve/"          # Linux/macOS
-echo "from .sparsesolv_ngsolve import *" > "$SITE_PACKAGES/sparsesolv_ngsolve/__init__.py"
-```
-
-## Step 3: Verify
-
-```bash
-python -c "import ngsolve; from sparsesolv_ngsolve import SparseSolvSolver; print('OK')"
-```
-
-Note: `import ngsolve` must be called before `import sparsesolv_ngsolve` to load
-NGSolve shared libraries first.
-
-## Alternative: pip install (from source)
-
-```bash
-pip install git+https://github.com/ksugahar/ngsolve-sparsesolv.git
-```
-
-Requires NGSolve to be discoverable by CMake.
+Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 """
 
 
 SPARSESOLV_EXAMPLE_POISSON = '''# 2D Poisson Problem with ICCG
 from ngsolve import *
-from sparsesolv_ngsolve import SparseSolvSolver
+from ngsolve.la import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -611,7 +590,7 @@ print(f"Final residual: {result.final_residual:.2e}")
 SPARSESOLV_EXAMPLE_CURLCURL = '''# 3D Curl-Curl (Electromagnetic) with Auto-Shift ICCG
 from ngsolve import *
 from netgen.occ import Box, Pnt
-from sparsesolv_ngsolve import SparseSolvSolver
+from ngsolve.la import SparseSolvSolver
 
 box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
 for face in box.faces:
@@ -646,7 +625,7 @@ print(f"Converged: {result.converged}, Iterations: {result.iterations}")
 SPARSESOLV_EXAMPLE_EDDY = '''# Complex Eddy Current Problem
 from ngsolve import *
 from netgen.occ import Box, Pnt, OCCGeometry
-from sparsesolv_ngsolve import SparseSolvSolver
+from ngsolve.la import SparseSolvSolver
 
 box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
 for face in box.faces:
@@ -683,7 +662,7 @@ print(f"Converged: {result.converged}, Iterations: {result.iterations}")
 SPARSESOLV_EXAMPLE_PRECOND = '''# Using IC/SGS Preconditioners with NGSolve CGSolver
 from ngsolve import *
 from ngsolve.krylovspace import CGSolver
-from sparsesolv_ngsolve import ICPreconditioner, SGSPreconditioner
+from ngsolve.la import ICPreconditioner, SGSPreconditioner
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -716,7 +695,7 @@ print(f"SGS+CG done")
 
 SPARSESOLV_EXAMPLE_DIVERGENCE = '''# Divergence Detection and Early Termination
 from ngsolve import *
-from sparsesolv_ngsolve import SparseSolvSolver
+from ngsolve.la import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -838,7 +817,7 @@ ICCG iteration count **grows** as O(h^-1).
 ## Python API
 
 ```python
-import sparsesolv_ngsolve as ssn
+from ngsolve import la as ssn
 
 # Real Compact AMS (for real SPD HCurl magnetostatics)
 pre_real = ssn.CompactAMSPreconditioner(
@@ -907,7 +886,7 @@ For Hermitian systems, use CG with conjugate=True.
 SPARSESOLV_EXAMPLE_COMPACT_AMS = '''# Compact AMS + COCR for Complex Eddy Current
 # ComplexCompactAMSPreconditioner + COCRSolver (TaskManager parallel Re/Im)
 from ngsolve import *
-import sparsesolv_ngsolve as ssn
+from ngsolve import la as ssn
 
 # --- Problem setup (simplified eddy current) ---
 from netgen.occ import Box, Pnt
