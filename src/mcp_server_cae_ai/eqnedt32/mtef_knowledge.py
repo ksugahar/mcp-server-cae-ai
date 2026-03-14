@@ -2,7 +2,7 @@
 MTEF (MathType Equation Format) v3 binary format knowledge base.
 
 Specification extracted from the EQNEDT32 equation editor C parser (eq2tex.c)
-and validated against 200+ roundtrip-verified MTEF<->LaTeX pairs (59 automated E2E tests).
+and validated against 293+ roundtrip-verified MTEF<->LaTeX pairs (automated E2E tests).
 
 This knowledge enables Claude to:
 - Parse MTEF binary streams into LaTeX
@@ -11,7 +11,7 @@ This knowledge enables Claude to:
 
 Sources:
   - S:\\00_事務所理系\\Office\\数式3.0\\src\\eq2tex.c (parser, ~2900 lines)
-  - S:\\00_事務所理系\\Office\\数式3.0\\tests\\db\\ (159+ verified pairs)
+  - S:\\00_事務所理系\\Office\\数式3.0\\tests\\db\\ (293+ verified pairs)
   - Microsoft Equation Editor 3.0 (EQNEDT32.EXE) binary analysis
 """
 
@@ -898,6 +898,36 @@ LaTeX: W_{\operatorname{iron}} = \dfrac{\dfrac{1}{2}a_{1,50Hz}\omega^{2}
 NOTE: Nested fraction inside outer fraction numerator.
       279 bytes total.
 ```
+
+## BEM/Magnetic Moment Method (磁気モーメント法)
+```
+3 equations from PowerPoint (EQNEDT32 v3, roundtrip-verified):
+
+oleObject3 (921 bytes): Formula (A) scalar potential derivation (5-line gathered)
+  M/[μ₀(μs-1)] = (1/4πμ₀) Σ∮ [M_j·n_j(r_i-r_j)]/|r_i-r_j|³ dS_j + H_e(r_j)
+  → M/(μ₀(μs-1)) = -M/μ₀ · 1/3 + H₀
+  → (1/(μs-1) + 1/3)M = μ₀H₀
+  → ((μs+2)/(3(μs-1)))M = μ₀H₀
+  → M = 3(μs-1)/(μs+2) μ₀H₀
+
+oleObject4 (872 bytes): Formula (B) vector potential derivation (5-line gathered)
+  μsM/(μs-1) = (1/4π) Σ∮ [M_j×n_j×(r_i-r_j)]/|r_i-r_j|³ dS_j + B_e(r_j)
+  → M = 3(μs-1)/(μs+2) μ₀H₀
+
+oleObject5 (534 bytes): Conjectured equivalence (single line)
+  M + (1/4π) Σ∮ [M_j·n_j(r_i-r_j)]/|r_i-r_j|³ dS_j
+  = (1/4π) Σ∮ [M_j×n_j×(r_i-r_j)]/|r_i-r_j|³ dS_j
+
+NOTE: MathType v5 (DSMT4) equations from same PPTX are NOT supported by
+EQNEDT32 — "created by a newer version" error. Only v3 OLE objects work.
+
+Key MTEF patterns used:
+- Bold vectors: 02 87 XX 00 (typeface 0x87 = bold)
+- gathered PILE for multi-line derivation
+- tmSINT var=3 for ∮ (closed surface integral)
+- tmDBARFENCE (|r_i - r_j|³) for absolute value with superscript
+- Σ with tmSCRIPT for limits (char_symbol workaround)
+```
 """
 
 # ================================================================
@@ -1154,6 +1184,96 @@ cdots = char_symbol(0x22c5) + char_symbol(0x22c5) + char_symbol(0x22c5)
 # So the LaTeX output is clean: a_{1} + a_{3}b^{2} + \cdots
 ```
 
+## General Relativity Equation Examples
+
+15 verified equations from 一般相対性理論 textbook (293 total E2E verified):
+
+```python
+# L1: Line element  ds² = g_ij dx^i dx^j
+line_element = build_equation(
+    char_variable(ord('d')), char_variable(ord('s')),
+    tmpl_superscript([], [char_number(ord('2'))]),
+    char_symbol(0x3d),  # =
+    char_variable(ord('g')),
+    tmpl_subscript([], [char_variable(ord('i')), char_variable(ord('j'))]),
+    char_variable(ord('d')), char_variable(ord('x')),
+    tmpl_superscript([], [char_variable(ord('i'))]),
+    char_variable(ord('d')), char_variable(ord('x')),
+    tmpl_superscript([], [char_variable(ord('j'))]),
+)
+# LaTeX: ds^{2} = g_{ij}dx^{i}dx^{j}
+
+# L2: Christoffel symbols  Γ^i_jk = (1/2) g^il (∂g_lj/∂x^k + ...)
+# Uses: tmpl_subsup for mixed tensor indices, tmpl_fence for parentheses,
+#       char_symbol(0x2202) for ∂, char_ucgreek(0x0393) for Γ
+
+# L3: Geodesic equation  d²x^i/dτ² + Γ^i_jk (dx^j/dτ)(dx^k/dτ) = 0
+# Uses: tmpl_frac for derivatives, char_lcgreek(0x03c4) for τ
+
+# L6: Einstein field equation  G_ij = R_ij - (1/2)g_ij R = (8πG/c⁴)T_ij
+# Uses: char_lcgreek(0x03c0) for π, tmpl_frac for 8πG/c⁴
+
+# L7: Schwarzschild metric
+# ds² = -(1-2GM/c²r)c²dt² + (1-2GM/c²r)^{-1}dr² + r²dθ² + r²sin²θ dφ²
+# Uses: tmpl_fence for (1-2GM/c²r), tmpl_superscript([],[minus,1]) for ^{-1}
+#       char_function for sin, char_lcgreek(0x03b8) for θ, (0x03c6) for φ
+
+# L12: Proper time  dτ = √(-g₀₀) dt
+# IMPORTANT: Add REC_END after tmpl_sqrt() when trailing content follows!
+proper_time = build_equation(
+    char_variable(ord('d')), char_lcgreek(0x03c4),
+    char_symbol(0x3d),
+    tmpl_sqrt([char_symbol(0x2d), char_variable(ord('g')),
+               tmpl_subscript([], [char_number(ord('0')), char_number(ord('0'))])]),
+    b'\\x00',  # REC_END — terminates tmROOT extra slot parse
+    char_variable(ord('d')), char_variable(ord('t')),
+)
+# LaTeX: d\tau = \sqrt{-g_{00}}dt
+```
+
+## Computational EM (FEM) Equation Examples
+
+15 verified equations from 新しい計算電磁気学 (Igarashi, Kameari et al.):
+
+```python
+# Q1: Whitney 1-form edge element  N_ij = L_i∇L_j - L_j∇L_i
+# Uses: char_variable for N,L,i,j, char_symbol(0x2207) for ∇
+# LaTeX: N_{ij} = L_{i}\nabla L_{j} - L_{j}\nabla L_{i}
+
+# Q3: A-φ definition  B = ∇×A
+# LaTeX: B = \nabla  \times A
+
+# Q5: A-φ governing equation
+# ∇×(1/μ)∇×A + σ(∂A/∂t + ∇φ) = J_s
+# Uses: tmpl_frac for 1/μ, tmpl_fence(TM_PAREN) for grouping (outside integrals)
+# LaTeX: \nabla \times \dfrac{1}{\mu}\nabla \times A + \sigma\left(\dfrac{\partial A}{\partial t}+\nabla\phi\right) = J_{s}
+
+# Q7: Galerkin weak form for A-φ eddy current (3 integrals)
+# ∫(∇×N)·(1/μ)(∇×A)dΩ + ∫(N+∇ω)·σ(∂A/∂t+∇φ)dΩ = ∫N·J_s dΩ
+# CRITICAL: Uses inline_parens() inside integrals (NOT tmpl_fence!)
+# LaTeX: \int (\nabla\times N)\cdot\dfrac{1}{\mu}(\nabla\times A)d\Omega + ...
+
+# Q8: FEM stiffness matrix  K_ee' = ∫(∇×N_e)·(1/μ)(∇×N_e')dΩ
+# Uses: inline_parens() inside integral, char_symbol(0x2032) for prime (′)
+# LaTeX: K_{ee\prime} = \int (\nabla\times N_{e})\cdot\dfrac{1}{\mu}(\nabla\times N_{e\prime})d\Omega
+
+# Q11: AC steady state  (K + jωC){a} = {F}
+# Uses: tmpl_fence(TM_PAREN) + tmpl_fence(TM_BRACE) for curly brackets
+# LaTeX: \left( K + j\omega C \right)\left\{ a \right\} = \left\{ F \right\}
+
+# Q12: Discrete rot operator  {B} = R{A}
+# Uses: tmpl_fence(TM_BRACE) for curly brackets
+# LaTeX: \left\{ B \right\} = R\left\{ A \right\}
+
+# Q13: Exact sequence  RG = 0, DR = 0
+# Uses: char_symbol(0x002C) for comma separator
+# LaTeX: RG = 0,DR = 0
+
+# Q14: Discrete Hodge mass matrix  [μ]_ff' = ∫μ w^f · w^f' dV
+# Uses: tmpl_fence(TM_BRACK) for square brackets, char_symbol(0x2032) for prime
+# LaTeX: \left[\mu\right]_{ff\prime} = \int\mu w^{f}\cdot w^{f\prime}dV
+```
+
 ### Key Rules for Multi-Integral Equations
 
 1. **SIZE_FULL between integrals**: Add `SIZE_FULL` after each integral's display
@@ -1162,7 +1282,8 @@ cdots = char_symbol(0x22c5) + char_symbol(0x22c5) + char_symbol(0x22c5)
 
 2. **Parentheses inside integrals**: Use `inline_parens()` (char_function font),
    NOT `tmpl_fence_paren()`. Fence templates with display chars (typeface 0x96)
-   inside an integral's content LINE crash EQNEDT32 during paste.
+   inside an integral's content LINE cause crashes AND/OR stray `\int` in LaTeX
+   (fence display chars interfere with eq2tex.c Pass 2 display data detection).
 
 3. **Trailing content inside content LINE**: `dΩ`, `dx`, etc. go INSIDE the
    integral's content LINE, before the content LINE END.
@@ -1181,12 +1302,18 @@ When pasted via "DS Equation" clipboard format:
 - **tmSUM (29)** / **tmPROD (31)** templates crash EQNEDT32.
   Workaround: use char_symbol(0xE5) for Σ, char_symbol(0xD5) for Π
   combined with tmSCRIPT for sub/superscript limits.
-- **tmROOT (13)** crashes are unresolved — avoid for now.
-- **tmpl_fence inside integral content LINE** crashes EQNEDT32 during paste.
-  Any fence template (tmPAREN, tmBRACK, etc.) with display chars (typeface 0x96)
-  placed inside an integral's content LINE causes a crash. Workaround: use
-  `inline_parens()` which uses char_function font parentheses instead of
-  fence templates. Produces `(...)` instead of `\\left(...)\\right)`.
+- **tmROOT (13)** works via "DS Equation" paste, but has a parsing quirk:
+  the extra slot `parse_object_list` consumes ALL siblings until END.
+  If content follows the sqrt in the same LINE, add `REC_END` (0x00)
+  after the sqrt to terminate the extra slot before trailing chars.
+  Example: `tmpl_sqrt(content) + b'\\x00' + char(d) + char(t)`
+- **tmpl_fence inside integral content LINE** causes TWO problems:
+  1. **Crash**: May crash EQNEDT32 during paste.
+  2. **Stray \\int in LaTeX**: Fence display chars (typeface 0x96) inside the
+     integral's content LINE interfere with eq2tex.c Pass 2 display data
+     detection, causing the integral's own display ∫ to be output as \\int.
+  Workaround: use `inline_parens()` which uses char_function font parentheses
+  instead of fence templates. Produces `(...)` instead of `\\left(...)\\right)`.
 
 ## Multi-integral SIZE_FULL rule
 
