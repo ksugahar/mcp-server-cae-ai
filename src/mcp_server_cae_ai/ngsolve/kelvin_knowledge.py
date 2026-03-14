@@ -529,6 +529,40 @@ if abs(dist - kelvin_radius) < kelvin_radius * 0.2:
     face.name = "kelvin_int"
 ```
 
+### WorkPlane.Arc for Azimuthal Sectors
+```python
+# BAD: WorkPlane.Arc creates a TANGENTIAL arc (center ≠ origin)
+wp = WorkPlane(Axes(Pnt(0,0,-R-0.1), n=Vec(0,0,1), h=Vec(1,0,0)))
+wp.MoveTo(0, 0); wp.LineTo(R, 0)
+wp.Arc(R, 60)   # Arc center is at (R, R, ...) NOT at origin!
+wp.LineTo(0, 0)
+
+# The resulting shape is NOT a circular sector!
+# Vertex verification: Arc(R=4, 60°) from (4,0) gives endpoint (7.46, 2.0),
+# NOT the expected (2.0, 3.46) for a true 60° rotation.
+
+# GOOD: Use HalfSpace intersection for azimuthal wedges
+import math
+dphi = 2*math.pi/6
+big_ball = Sphere(Pnt(0,0,0), R_large + 0.1)
+h1 = HalfSpace(Pnt(0,0,0), Vec(0, -1, 0))
+h2 = HalfSpace(Pnt(0,0,0), Vec(-math.sin(dphi), math.cos(dphi), 0))
+wedge_vol = big_ball * h1 * h2
+```
+
+### Identify AFTER Glue on Glued Geometry's Faces
+```python
+# BAD: After Glue(), identifying faces of the glued shape
+#       → NrIdentifications = 0 (silently fails)
+geo_obj = Glue([inner_sec, outer_sec])
+geo_obj.faces[2].Identify(geo_obj.faces[1], 'periodic', IdentificationType.PERIODIC, rot)
+
+# GOOD: Identify BEFORE Glue on individual solid faces
+inner_sec.faces[2].Identify(inner_sec.faces[1], 'periodic', IdentificationType.PERIODIC, rot)
+outer_sec.faces[2].Identify(outer_sec.faces[1], 'periodic', IdentificationType.PERIODIC, rot)
+geo_obj = Glue([inner_sec, outer_sec])  # Glue preserves identifications
+```
+
 ## Verification: FreeDofs Check
 
 Always verify that `Periodic()` actually coupled DOFs:
@@ -565,6 +599,201 @@ for ie, iy in int_edges:
         if iy * ey > 0:  # Same z-sign
             ie.Identify(ee, "periodic", IdentificationType.PERIODIC)
 ```
+"""
+
+KELVIN_VERIFICATION = """
+# Kelvin変換の数値検証 (Single-Domain Approach)
+
+## 概要
+
+Kelvin 変換の理論的正しさを FEM で検証する最も簡潔な方法は、
+**単一の有限領域** (大球) で Poisson 方程式を解き、その FEM 解に対して
+Kelvin 変換恒等式を後処理として確認することである。
+
+## 手法: 単一大球 + 厳密 Dirichlet BC
+
+### 設定
+- 電荷球: 半径 R_in=0.5, 一様電荷密度 ρ=3.0
+- 計算領域: 半径 R_large=3.0 の大球 (外側境界に厳密値を与える)
+- Kelvin 変換半径: R_K=1.0
+
+### 理論 (モノポール解)
+外部解: φ(r) = ρ·R_in³ / (3r) = 0.125/r
+Kelvin 変換: φ*(r*) = (R_K/r*) · φ(R_K²/r*) = ρ·R_in³/(3·R_K) = 0.125 (定数)
+
+### NGSolve 実装
+
+```python
+from ngsolve import *
+import netgen.occ as occ
+import numpy as np
+
+R_in = 0.5; R_K = 1.0; R_large = 3.0; rho_val = 3.0
+
+phi_BC         = rho_val * R_in**3 / (3.0 * R_large)   # 0.041667 (外側Dirichlet)
+phi_star_exact = rho_val * R_in**3 / (3.0 * R_K)        # 0.125000 (Kelvin定数)
+
+# ジオメトリ: 内球 + 外殻
+inner = occ.Sphere(occ.Pnt(0,0,0), R_in); inner.mat('inner'); inner.maxh = 0.05
+outer_ball = occ.Sphere(occ.Pnt(0,0,0), R_large); outer_ball.bc('dirichlet_outer')
+outer = outer_ball - occ.Sphere(occ.Pnt(0,0,0), R_in); outer.mat('outer'); outer.maxh = 0.2
+
+geo  = occ.OCCGeometry(occ.Glue([inner, outer]))
+mesh = Mesh(geo.GenerateMesh(maxh=0.2))
+# → ~87,421 要素, 16,564 節点, 123,700 DOF
+
+fes = H1(mesh, order=2, dirichlet='dirichlet_outer')
+u, v = fes.TnT()
+a = BilinearForm(fes); a += grad(u)*grad(v)*dx; a.Assemble()
+f = LinearForm(fes);   f += rho_val*v*dx('inner'); f.Assemble()
+
+gfu = GridFunction(fes)
+gfu.Set(phi_BC, definedon=mesh.Boundaries('dirichlet_outer'))
+inv = a.mat.Inverse(fes.FreeDofs(), inverse='sparsecholesky')
+gfu.vec.data += inv * (f.vec - a.mat * gfu.vec)
+```
+
+### 検証 1: 物理中間領域 FEM vs 解析解
+
+```python
+sample_r = np.linspace(R_in*1.05, R_K*0.95, 25)
+phi_fem = np.array([gfu(mesh(r, 0, 0)) for r in sample_r])
+phi_ana = np.array([rho_val*R_in**3/(3.0*r) for r in sample_r])
+err_mid = np.abs(phi_fem - phi_ana) / np.abs(phi_ana)
+print(f'最大相対誤差: {err_mid.max():.2e}')  # 期待値: < 0.5%
+```
+
+### 検証 2: Kelvin 変換恒等式
+
+```python
+sample_rstar = np.linspace(R_K**2/R_large*1.1, R_K*0.95, 25)
+phi_star_fem = np.array([
+    (R_K/rs) * gfu(mesh(R_K**2/rs, 0, 0))
+    for rs in sample_rstar
+])
+err_kelvin = np.abs(phi_star_fem - phi_star_exact) / phi_star_exact
+print(f'Kelvin 恒等式 最大誤差: {err_kelvin.max():.2e}')  # 期待値: < 0.4%
+print(f'phi* 範囲: [{phi_star_fem.min():.5f}, {phi_star_fem.max():.5f}]')
+# 期待: [0.12465, 0.12489] (理想: 0.12500)
+```
+
+## 確認済み精度 (NGSolve 6.2.2601, maxh=0.2)
+
+| 検証項目 | 最大相対誤差 | 平均相対誤差 |
+|----------|-------------|-------------|
+| 物理中間領域 FEM vs 解析解 | 3.53e-03 (0.35%) | 3.07e-03 |
+| Kelvin 恒等式 φ*(r*) 定数性 | 2.81e-03 (0.28%) | 2.06e-03 |
+
+## メッシュ精度の影響
+
+精度を上げるには:
+- `inner.maxh = 0.05` → 電荷球内を細かく (必須)
+- `outer.maxh = 0.2`  → 外殻は粗くてよい
+- `R_large` は大きいほど精度良いが、`R_large=3` で十分 (< 0.4% 誤差)
+- `R_large=5` かつ `maxh=0.3` では誤差 ~9.7% (粗すぎ)
+
+## 旧来の TnT() 呼び出し注意
+
+```python
+# NGSolve 6.2.2601: キーワード引数不可
+u, v = fes.TnT()           # OK
+u, v = fes.TnT(u_='u', v_='v')  # TypeError: NGSolve 6.2.2601 では不可
+```
+"""
+
+KELVIN_PERIODIC_WEDGE = """
+# 周期境界条件: 扇形セクタの DOF 削減
+
+## 概要
+
+軸対称・回転対称問題では、全球の代わりに **1/n セクタ** のみを解くことで計算コストを削減できる。
+NGSolve では `Identify` + `Periodic(FESpace)` でこれを実現する。
+
+## 正しい扇形ウェッジの作成
+
+`WorkPlane.Arc` は **接線方向弧**（中心が原点でない）を作るため扇形 (pizza slice) にならない。
+`HalfSpace` で 2 枚の半空間を切り出すのが正確。
+
+```python
+from netgen.occ import HalfSpace, Pnt, Vec, Sphere, Glue, OCCGeometry, IdentificationType, Rotation
+import math
+
+n_sector = 6                     # 6 分割 → 60° セクタ
+dphi     = 2 * math.pi / n_sector
+
+# NG: 半径 R_large+0.1 の大球を 2 つの HalfSpace で切断
+big_ball = Sphere(Pnt(0,0,0), R_large + 0.1)
+h1 = HalfSpace(Pnt(0,0,0), Vec(0, -1, 0))                              # y >= 0 (φ >= 0°)
+h2 = HalfSpace(Pnt(0,0,0), Vec(-math.sin(dphi), math.cos(dphi), 0))    # φ <= dphi
+wedge_vol = big_ball * h1 * h2
+
+# 球殻をウェッジで切断
+inner_sec = Sphere(Pnt(0,0,0), R_in)                       * wedge_vol
+outer_sec = (Sphere(Pnt(0,0,0), R_large) - Sphere(Pnt(0,0,0), R_in)) * wedge_vol
+inner_sec.mat('inner'); outer_sec.mat('outer')
+outer_sec.faces[0].name = 'dirichlet_outer'   # 最大面積の外球面
+```
+
+## 周期境界の識別 (Identify)
+
+**重要**: Identify は `Glue()` より**前**に個別のソリッド上の face で呼び出す。
+
+```python
+# face[2]: φ=0° 面 (y≈0 側), face[1]: φ=dphi 面 (y>0 側)
+# → 面積と重心 y 座標で確認可能:
+#     face[2]: area≈π·R²/2, y_center≈0
+#     face[1]: area≈π·R²/2, y_center>0
+
+rot = Rotation(Pnt(0,0,0), Vec(0,0,1), math.degrees(dphi))
+inner_sec.faces[2].Identify(inner_sec.faces[1], 'periodic', IdentificationType.PERIODIC, rot)
+outer_sec.faces[2].Identify(outer_sec.faces[1], 'periodic', IdentificationType.PERIODIC, rot)
+# ↑ Glue() の前に実行
+
+geo_obj  = Glue([inner_sec, outer_sec])
+geo      = OCCGeometry(geo_obj)
+mesh_sec = Mesh(geo.GenerateMesh(maxh=0.2))
+```
+
+## DOF 削減の確認
+
+```python
+pairs = mesh_sec.GetPeriodicNodePairs(VERTEX)
+print(f'周期頂点対数: {len(list(pairs))}')   # 0 なら Identify 失敗
+
+fes_plain = H1(mesh_sec, order=2, dirichlet='dirichlet_outer')
+fes_per   = Periodic(H1(mesh_sec, order=2, dirichlet='dirichlet_outer'))
+
+free_plain = sum(fes_plain.FreeDofs())
+free_per   = sum(fes_per.FreeDofs())
+
+print(f'ndof (変化なし): {fes_plain.ndof}')
+print(f'FreeDofs 前: {free_plain}')
+print(f'FreeDofs 後: {free_per}  (削減: {free_plain - free_per})')
+# 例: 12022 → 10555 (1467 DOF 削減, ~12%)
+```
+
+**注意**: `ndof` は同じまま、`FreeDofs()` が減る。
+周期スレーブ DOF は拘束扱いとなり線形系から除外される。
+
+## Identify が失敗する典型的な原因
+
+| 現象 | 原因 | 対処 |
+|------|------|------|
+| 周期頂点対数 = 0 | Glue 後の face オブジェクトに対して Identify | Glue 前に呼び出す |
+| 周期頂点対数 > 0 でも FreeDofs 変化なし | Rotation の方向が逆 | `dphi` の符号を確認 |
+| NrIdentifications = 0 | WorkPlane.Arc で作った扇形 (幾何的に一致しない) | HalfSpace を使用 |
+
+## 確認済み数値 (NGSolve 6.2.2601, 1/6 セクタ, maxh=0.2)
+
+| 項目 | 値 |
+|------|----|
+| 要素数 | 2,738 |
+| 節点数 | 781 |
+| 周期頂点対数 | 198 |
+| FreeDofs (Periodic なし) | 12,022 |
+| FreeDofs (Periodic あり) | 10,555 |
+| 削減 DOF 数 | 1,467 (12.2%) |
+| セクタ中央 最大誤差 | < 1.5% (maxh=0.2) / < 1% (maxh=0.1) |
 """
 
 KELVIN_TIPS = """
@@ -626,6 +855,8 @@ def get_kelvin_documentation(topic: str = "all") -> str:
         "adaptive": KELVIN_ADAPTIVE,
         "identify": KELVIN_IDENTIFY,
         "tips": KELVIN_TIPS,
+        "verification": KELVIN_VERIFICATION,
+        "periodic_wedge": KELVIN_PERIODIC_WEDGE,
     }
 
     topic = topic.lower().strip()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-server-cae-ai"
-version = "1.7.1"
+version = "1.8.0"
 description = "MCP servers for CAE: Radia magnetostatics + NGSolve FEM + Cubit meshing + EQNEDT32 MTEF"
 readme = "README.md"
 requires-python = ">=3.10"
