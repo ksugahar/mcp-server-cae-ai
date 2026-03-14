@@ -8,6 +8,7 @@ Provides tools for:
 - ngsolve.la (Compact AMS/COCR/ICCG, formerly ngsolve-sparsesolv) solver documentation
 - Kelvin transformation reference for open boundary FEM
 - Induction heating workflow (EM -> Joule heat -> transient thermal, 7 topics)
+- ngbem BEM inductance extraction (Cubit -> SetGeomInfo -> Curve -> LaplaceSL, 7 topics)
 
 Usage:
     mcp-server-ngsolve              # Start MCP server (stdio transport)
@@ -25,6 +26,7 @@ from .ngsolve_knowledge import get_ngsolve_documentation
 from .sparsesolv_knowledge import get_sparsesolv_documentation
 from .kelvin_knowledge import get_kelvin_documentation
 from .induction_heating_knowledge import get_induction_heating_documentation
+from .ngbem_inductance_knowledge import get_ngbem_inductance_documentation
 
 mcp = FastMCP("ngsolve-lint")
 
@@ -446,6 +448,38 @@ def induction_heating(topic: str = "all") -> str:
             "pitfalls"      - Common mistakes in induction heating simulation
     """
     return get_induction_heating_documentation(topic)
+
+
+@mcp.tool()
+def ngbem_inductance(topic: str = "all") -> str:
+    """
+    Get ngbem boundary element method documentation for inductance extraction.
+
+    ngbem is NGSolve's native boundary element module. Combined with Cubit
+    mesh export and SetGeomInfo, it enables accurate inductance extraction
+    on high-order curved surface elements.
+
+    Key workflow:
+      Cubit mesh -> export_NetgenMesh(geometry=geo) -> set_*_geominfo()
+      -> mesh.Curve(order) -> LaplaceSL BEM -> L extraction
+
+    Sources:
+      - https://docu.ngsolve.org/latest/how_to/ngbem.html
+      - https://github.com/Weggler/docu-ngsbem/ (stabilized BEM)
+      - https://github.com/ksugahar/Coreform_Cubit_Mesh_Export
+
+    Args:
+        topic: Documentation topic. Options:
+            "all"            - Complete documentation
+            "overview"       - What is ngbem, comparison with Radia PEEC
+            "api"            - LaplaceSL operator, HDivSurface, matrix extraction
+            "cubit_workflow" - Cubit -> SetGeomInfo -> Curve -> BEM pipeline
+            "curve_order"    - Curve order convergence study for BEM accuracy
+            "stabilized"     - Weggler's stabilized BEM for low-frequency
+            "examples"       - Runnable examples (circular loop, Cubit torus)
+            "best_practices" - Common pitfalls, validation, performance tips
+    """
+    return get_ngbem_inductance_documentation(topic)
 
 
 # ============================================================

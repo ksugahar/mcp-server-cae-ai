@@ -8,4 +8,4 @@ Consolidates domain knowledge from Kindai University Sugahara Lab:
 - Cubit-to-Netgen high-order curving workflows
 """
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"

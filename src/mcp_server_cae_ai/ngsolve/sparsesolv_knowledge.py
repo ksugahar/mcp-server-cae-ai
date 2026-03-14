@@ -791,6 +791,13 @@ For eddy current `K + jw*sigma*M`, the correct real auxiliary is:
 - Wrong scaling (mass=1.0): 500 iterations, COCR does not converge
 - Correct scaling (mass=|omega*sigma|): **13 iterations**, relative error 2.15e-10
 
+**Verified** (large problem, 44,056 DOFs, |omega*sigma|=1.88e11, NGSolve 6.2.2601):
+- Wrong scaling (mass=1.0): ~500 iterations, no convergence
+- Correct scaling (mass=|omega*sigma|=1.88e11): **14 iterations**, relative error 7.5e-10 vs direct solver
+
+The test confirmed that mesh-size and omega*sigma scale do NOT affect iteration count
+when `a_real` is scaled correctly — only 1–2 extra iterations across a 15x DOF increase.
+
 ### Why a_real is needed
 
 AMS auxiliary space corrections (G, Pi) operate on real arithmetic.
