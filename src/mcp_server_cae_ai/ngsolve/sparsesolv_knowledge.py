@@ -2,34 +2,34 @@
 ngsolve-sparsesolv knowledge base for MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 3.1.0 (types unified into ngsolve.la)
+Version: 3.1.0
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
-Since version 3.1.0, sparsesolv types are unified into the ngsolve.la module.
-Import: from ngsolve.la import CompactAMSPreconditioner, COCRSolver, etc.
-The standalone sparsesolv_ngsolve module is deprecated; use ngsolve.la directly.
+Import: from sparsesolv_ngsolve import CompactAMSPreconditioner, COCRSolver, etc.
+Install: pip install sparsesolv-ngsolve (PyPI standalone add-on package)
+Requires: ngsolve >= 6.2.2601
 """
 
 SPARSESOLV_OVERVIEW = """
-# ngsolve-sparsesolv (now in ngsolve.la)
+# ngsolve-sparsesolv
 
 ## What It Is
 
-Since version 3.1.0, ngsolve-sparsesolv types are **unified into `ngsolve.la`**.
-All solvers and preconditioners are available directly via:
+A standalone PyPI add-on package for NGSolve providing iterative solvers
+and preconditioners. Install: `pip install sparsesolv-ngsolve`
 
 ```python
-from ngsolve.la import (
+import sparsesolv_ngsolve as ssn
+# or:
+from sparsesolv_ngsolve import (
     SparseSolvSolver, ICPreconditioner, SGSPreconditioner,
     CompactAMSPreconditioner, ComplexCompactAMSPreconditioner,
     CompactAMGPreconditioner, COCRSolver, GMRESSolver,
 )
 ```
 
-The standalone `sparsesolv_ngsolve` module is deprecated. Use `ngsolve.la` directly.
-
-**Key capabilities (now in ngsolve.la):**
+**Key capabilities:**
 
 | Capability           | Description                                       |
 |----------------------|---------------------------------------------------|
@@ -47,7 +47,7 @@ Based on: JP-MARs/SparseSolv (https://github.com/JP-MARs/SparseSolv)
 ## Architecture
 
 - **Header-only C++17 core**: `include/sparsesolv/` (no separate .cpp compilation)
-- **Unified into ngsolve.la**: Types registered in NGSolve's `la` module via pybind11
+- **Standalone PyPI package**: `pip install sparsesolv-ngsolve`, lightweight add-on
 - **NGSolve integration**: Links against NGSolve's `SparseMatrix`, `BaseVector`,
   `BitArray`, `BilinearForm`, `FESpace` for seamless interop
 - **Parallel backend**: Compile-time dispatch to NGSolve TaskManager, OpenMP, or serial
@@ -96,8 +96,8 @@ SPARSESOLV_API = """
 ## Import
 
 ```python
-# Since ngsolve-sparsesolv 3.1.0, all types are in ngsolve.la
-from ngsolve.la import (
+# sparsesolv-ngsolve is a standalone PyPI package
+from sparsesolv_ngsolve import (
     SparseSolvSolver,      # All-in-one solver factory
     ICPreconditioner,      # IC preconditioner for use with NGSolve CGSolver
     SGSPreconditioner,     # SGS preconditioner for use with NGSolve CGSolver
@@ -113,7 +113,7 @@ from ngsolve.la import (
 )
 ```
 
-Note: `import ngsolve` is required before accessing `ngsolve.la` types.
+Note: `import ngsolve` must be done before `import sparsesolv_ngsolve`.
 
 ## SparseSolvSolver
 
@@ -226,7 +226,7 @@ SPARSESOLV_EXAMPLES = """
 
 ```python
 from ngsolve import *
-from ngsolve.la import SparseSolvSolver
+from sparsesolv_ngsolve import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -526,32 +526,25 @@ Using the wrong setting causes divergence or extremely slow convergence
 SPARSESOLV_BUILD = """
 # Installation
 
-## Since ngsolve-sparsesolv 3.1.0 (Recommended)
-
-Types are unified into `ngsolve.la`. No separate installation needed:
+## PyPI (Recommended)
 
 ```bash
-pip install ngsolve>=6.2.2601  # sparsesolv types included in ngsolve.la
+pip install ngsolve>=6.2.2601     # Required dependency
+pip install sparsesolv-ngsolve    # Standalone add-on package
 ```
 
 Verify:
 
 ```bash
-python -c "from ngsolve.la import SparseSolvSolver, CompactAMSPreconditioner; print('OK')"
+python -c "from sparsesolv_ngsolve import SparseSolvSolver, CompactAMSPreconditioner; print('OK')"
 ```
 
 ## Building from source (development only)
 
-For development or custom builds:
-
 ```bash
 git clone https://github.com/ksugahar/ngsolve-sparsesolv.git
 cd ngsolve-sparsesolv
-mkdir build && cd build
-
-cmake .. -DSPARSESOLV_BUILD_NGSOLVE=ON \\
-         -DNGSOLVE_INSTALL_DIR=/path/to/ngsolve/install/cmake
-cmake --build . --config Release
+pip install -e .  # editable install with scikit-build-core
 ```
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
@@ -560,7 +553,7 @@ Repository: https://github.com/ksugahar/ngsolve-sparsesolv
 
 SPARSESOLV_EXAMPLE_POISSON = '''# 2D Poisson Problem with ICCG
 from ngsolve import *
-from ngsolve.la import SparseSolvSolver
+from sparsesolv_ngsolve import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -590,7 +583,7 @@ print(f"Final residual: {result.final_residual:.2e}")
 SPARSESOLV_EXAMPLE_CURLCURL = '''# 3D Curl-Curl (Electromagnetic) with Auto-Shift ICCG
 from ngsolve import *
 from netgen.occ import Box, Pnt
-from ngsolve.la import SparseSolvSolver
+from sparsesolv_ngsolve import SparseSolvSolver
 
 box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
 for face in box.faces:
@@ -625,7 +618,7 @@ print(f"Converged: {result.converged}, Iterations: {result.iterations}")
 SPARSESOLV_EXAMPLE_EDDY = '''# Complex Eddy Current Problem
 from ngsolve import *
 from netgen.occ import Box, Pnt, OCCGeometry
-from ngsolve.la import SparseSolvSolver
+from sparsesolv_ngsolve import SparseSolvSolver
 
 box = Box(Pnt(0, 0, 0), Pnt(1, 1, 1))
 for face in box.faces:
@@ -662,7 +655,7 @@ print(f"Converged: {result.converged}, Iterations: {result.iterations}")
 SPARSESOLV_EXAMPLE_PRECOND = '''# Using IC/SGS Preconditioners with NGSolve CGSolver
 from ngsolve import *
 from ngsolve.krylovspace import CGSolver
-from ngsolve.la import ICPreconditioner, SGSPreconditioner
+from sparsesolv_ngsolve import ICPreconditioner, SGSPreconditioner
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.05))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -695,7 +688,7 @@ print(f"SGS+CG done")
 
 SPARSESOLV_EXAMPLE_DIVERGENCE = '''# Divergence Detection and Early Termination
 from ngsolve import *
-from ngsolve.la import SparseSolvSolver
+from sparsesolv_ngsolve import SparseSolvSolver
 
 mesh = Mesh(unit_square.GenerateMesh(maxh=0.1))
 fes = H1(mesh, order=2, dirichlet="bottom|right|top|left")
@@ -770,22 +763,55 @@ GMRES (m vectors). Result: 3.5x faster than GMRES.
 ## Complex Re/Im Splitting
 
 For complex system (K + jw*sigma*M) * x = b:
-1. Build real SPD auxiliary matrix: A_real = K + eps*M + |omega|*sigma*M_cond
+1. Build real SPD auxiliary matrix: A_real = K + |omega*sigma|*M (CRITICAL SCALING!)
 2. ComplexCompactAMS creates two independent AMS instances
 3. Apply: y_re = AMS(x_re), y_im = AMS(x_im) in TaskManager parallel
 
 The `a_real` matrix must be real SPD, built in a **real** HCurl space
 (same mesh, order, nograds, Dirichlet BC, but complex=False).
 
+### CRITICAL: Real Auxiliary Matrix Scaling
+
+**The #1 cause of AMS+COCR "not converging" is wrong scaling of a_real.**
+
+```python
+# WRONG: mass=1.0 (always diverges on real problems!)
+a_real += curl(u)*curl(v)*dx + 1.0 * u*v*dx     # -> 500 iters, no convergence
+
+# CORRECT: mass=|omega*sigma| (matches complex system scale)
+a_real += curl(u)*curl(v)*dx + abs(omega*sigma) * u*v*dx  # -> 14 iters, 7.5e-10 error
+```
+
+The real auxiliary matrix MUST match the spectral structure of the complex system.
+For eddy current `K + jw*sigma*M`, the correct real auxiliary is:
+- `A_real = K + |omega*sigma|*M` (captures same scale)
+- Optionally add `+ eps*M` (eps ~ 1e-6) for IC regularization
+
+**Verified**: 44,056 DOFs, 30 kHz, sigma=1e6:
+- Wrong scaling (mass=1.0): 500 iterations, COCR does not converge
+- Correct scaling (mass=|omega*sigma|): **14 iterations**, relative error 7.5e-10
+
 ### Why a_real is needed
 
 AMS auxiliary space corrections (G, Pi) operate on real arithmetic.
 Complex system matrix A = K + jw*sigma*M cannot be used directly.
-Real auxiliary matrix `A_real = K + |omega|*sigma*M + eps*M` captures
+Real auxiliary matrix `A_real = K + |omega*sigma|*M` captures
 the same spectral structure without imaginary part.
 
-`eps*M` (eps ~ 1e-6) stabilizes IC factorization inside CompactAMG.
-Without it, IC may break down on pure curl-curl matrices.
+### NGSolve built-in HCurlAMG: Known Crash
+
+NGSolve 6.2.2601's built-in `HCurlAMG` preconditioner crashes with
+access violation (-1073741819). This is an NGSolve bug, NOT a sparsesolv issue.
+Use `CompactAMSPreconditioner` from sparsesolv as a working replacement.
+
+### COCRSolver API
+
+```python
+# COCRSolver returns iterations via .iterations attribute (not .last_result)
+solver = COCRSolver(a.mat, pre, maxiter=500, tol=1e-10)
+gfu.vec.data = solver * f.vec
+print(f"Iterations: {solver.iterations}")  # Direct attribute, not .last_result
+```
 
 ## Benchmark: AMS vs ICCG Scaling
 
@@ -817,7 +843,7 @@ ICCG iteration count **grows** as O(h^-1).
 ## Python API
 
 ```python
-from ngsolve import la as ssn
+import sparsesolv_ngsolve as ssn
 
 # Real Compact AMS (for real SPD HCurl magnetostatics)
 pre_real = ssn.CompactAMSPreconditioner(
@@ -886,7 +912,7 @@ For Hermitian systems, use CG with conjugate=True.
 SPARSESOLV_EXAMPLE_COMPACT_AMS = '''# Compact AMS + COCR for Complex Eddy Current
 # ComplexCompactAMSPreconditioner + COCRSolver (TaskManager parallel Re/Im)
 from ngsolve import *
-from ngsolve import la as ssn
+import sparsesolv_ngsolve as ssn
 
 # --- Problem setup (simplified eddy current) ---
 from netgen.occ import Box, Pnt
@@ -911,12 +937,13 @@ f_vec += CF((0, 0, 1)) * v * dx
 f_vec.Assemble()
 
 # --- Real auxiliary matrix for Compact AMS ---
+# CRITICAL: mass coefficient must be |omega*sigma| to match complex system scale!
+# Using mass=1.0 will cause COCR to diverge (500+ iterations, no convergence).
 fes_real = HCurl(mesh, order=1, nograds=True, dirichlet="outer", complex=False)
 u_r, v_r = fes_real.TnT()
 a_real = BilinearForm(fes_real)
 a_real += nu * curl(u_r) * curl(v_r) * dx
-a_real += 1e-6 * nu * u_r * v_r * dx           # regularization
-a_real += abs(omega) * sigma * u_r * v_r * dx   # eddy current
+a_real += abs(omega * sigma) * u_r * v_r * dx   # MUST match |omega*sigma| scale!
 a_real.Assemble()
 
 # --- Discrete gradient + vertex coordinates ---
@@ -938,7 +965,7 @@ gfu = GridFunction(fes)
 with TaskManager():
     gfu.vec.data = solver * f_vec.vec
 
-print(f"COCR converged in {solver.GetSteps()} iterations")
+print(f"COCR converged in {solver.iterations} iterations")
 '''
 
 
