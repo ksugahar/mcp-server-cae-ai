@@ -24,9 +24,11 @@ Key features relevant to electromagnetic simulation:
 ## Installation
 
 ```bash
-pip install ngsolve==6.2.2405   # CRITICAL: use this version for Radia
-# Version 6.2.2406+ has Periodic BC regression (Identify() lost in Glue())
+pip install ngsolve   # Use official PyPI ngsolve >= 6.2.2601
+# Version 6.2.2601 includes: MKL + PARDISO + Periodic BC fix
+# Periodic BC regression (6.2.2406~6.2.2501) is FIXED in 6.2.2601+
 # See: https://forum.ngsolve.org/t/3805
+# Optional: pip install ngsolve-sparsesolv  # Compact AMS/COCR solvers
 ```
 
 ## Basic Workflow
