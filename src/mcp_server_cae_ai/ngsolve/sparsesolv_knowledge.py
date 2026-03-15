@@ -2,7 +2,7 @@
 ngsolve-sparsesolv knowledge base for MCP server.
 
 Repository: https://github.com/ksugahar/ngsolve-sparsesolv
-Version: 3.1.0
+Version: 3.1.1
 License: MPL 2.0
 Based on: JP-MARs/SparseSolv
 
@@ -843,6 +843,27 @@ a_real += (abs(omega*sigma) + eps_reg) * u_r * v_r * dx
 - `eps=0.05*nu`: Best balance (B field error 0.25%, COCR converges)
 - The 96% "error" without regularization is gauge freedom (E differs, curl(E) is same)
 - Uniform sigma (all conducting): No regularization needed (COCR: 13 iters, 2e-10 error)
+
+### CompactAMGPreconditioner: pybind11 Registration (Fixed in v3.1.1)
+
+**Symptom**: `NGException: Mult or MultAdd must be implemented for BaseMatrix!`
+when using `CompactAMGPreconditioner` as a preconditioner in NGSolve's `CGSolver`.
+
+**Root cause**: `CompactAMG` C++ class was not registered as a pybind11 type.
+When the factory function returned `shared_ptr<BaseMatrix>`, pybind11 could not
+find the runtime type and wrapped it as the base `ngsolve.la.BaseMatrix` Python
+type. Python-level virtual dispatch then called `BaseMatrix::Mult` (which throws)
+instead of `CompactAMG::Mult`.
+
+**Fix (v3.1.1)**: Register `CompactAMG` as `CompactAMGPreconditionerImpl` pybind11
+class, and change factory return type to `shared_ptr<CompactAMG>`. This pattern
+(register the derived class + return derived shared_ptr) is required for any
+C++ class that overrides virtual methods and is used as a Python preconditioner.
+
+**Lesson**: All sparsesolv preconditioner/solver C++ classes that override
+`BaseMatrix::Mult` must be registered with pybind11. Compare: `CompactAMS` was
+registered as `CompactAMSPreconditionerImpl` and worked; `CompactAMG` was not
+registered and failed silently until used in `CGSolver`.
 
 ### NGSolve built-in HCurlAMG: Known Crash
 
